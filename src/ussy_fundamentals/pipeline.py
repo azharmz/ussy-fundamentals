@@ -69,13 +69,10 @@ def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
         row_accepted = pd.to_datetime(s["accepted_at"], errors="coerce", utc=True)
         annual_accepted = pd.to_datetime(s["annual_eps_accepted_at"], errors="coerce", utc=True)
 
-        # Remove any state that violates PIT before building the canonical state timeline.
         future = annual_accepted.notna() & row_accepted.notna() & annual_accepted.gt(row_accepted)
         if future.any():
             s.loc[future, state_cols] = pd.NA
 
-        # Canonical annual events are keyed by the annual state's own acceptance timestamp,
-        # not by the quarterly row on which they happen to be carried.
         state = s[s["annual_eps"].notna() & s["annual_eps_accepted_at"].notna()][state_cols].copy()
         if state.empty:
             pieces.append(s)
@@ -100,12 +97,9 @@ def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
             allow_exact_matches=True,
         ).set_index(left.sort_values("_row_accepted_at").index)
 
-        # Rebuild annual state from the canonical PIT timeline, rather than preserving
-        # potentially inconsistent per-CIK carry-forward values.
         for c in state_cols:
             left[c] = carry.reindex(left.index)[c]
 
-        # Defensive invariant check: if anything still points to the future, clear it.
         final_annual_accepted = pd.to_datetime(left["annual_eps_accepted_at"], errors="coerce", utc=True)
         final_row_accepted = pd.to_datetime(left["accepted_at"], errors="coerce", utc=True)
         bad = final_annual_accepted.notna() & final_row_accepted.notna() & final_annual_accepted.gt(final_row_accepted)
@@ -116,6 +110,66 @@ def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
         pieces.append(left)
 
     return pd.concat(pieces, ignore_index=True)
+
+
+def _add_missing_reason_metadata(wide_df: pd.DataFrame) -> pd.DataFrame:
+    """Make intentional vs unexplained NA values self-explaining in the final parquet.
+
+    The vocabulary is intentionally conservative. A missing reason describes why the final
+    dataset does not expose a value; it does not fabricate a replacement value.
+    """
+    out = wide_df.copy()
+    fp = out["fp"].astype("string") if "fp" in out.columns else pd.Series(pd.NA, index=out.index, dtype="string")
+
+    def reason_col(value_col: str) -> pd.Series:
+        return pd.Series(pd.NA, index=out.index, dtype="string")
+
+    if "quarterly_eps" in out.columns:
+        r = reason_col("quarterly_eps")
+        missing = out["quarterly_eps"].isna()
+        r.loc[missing & fp.eq("Q4")] = "Q4_EXCLUDED_POLICY"
+        r.loc[missing & r.isna()] = "NO_DIRECT_QUARTER"
+        out["quarterly_eps_missing_reason"] = r
+
+    if "quarterly_revenue" in out.columns:
+        r = reason_col("quarterly_revenue")
+        missing = out["quarterly_revenue"].isna()
+        r.loc[missing] = "NO_DIRECT_QUARTER"
+        out["quarterly_revenue_missing_reason"] = r
+
+    if "quarterly_eps_yoy" in out.columns:
+        r = reason_col("quarterly_eps_yoy")
+        missing = out["quarterly_eps_yoy"].isna()
+        if "quarterly_eps_missing_reason" in out.columns:
+            inherited = missing & out["quarterly_eps"].isna()
+            r.loc[inherited] = out.loc[inherited, "quarterly_eps_missing_reason"]
+        r.loc[missing & r.isna()] = "NO_COMPARATIVE_AVAILABLE"
+        out["quarterly_eps_yoy_missing_reason"] = r
+
+    if "quarterly_revenue_yoy" in out.columns:
+        r = reason_col("quarterly_revenue_yoy")
+        missing = out["quarterly_revenue_yoy"].isna()
+        if "quarterly_revenue_missing_reason" in out.columns:
+            inherited = missing & out["quarterly_revenue"].isna()
+            r.loc[inherited] = out.loc[inherited, "quarterly_revenue_missing_reason"]
+        r.loc[missing & r.isna()] = "NO_COMPARATIVE_AVAILABLE"
+        out["quarterly_revenue_yoy_missing_reason"] = r
+
+    if "annual_eps" in out.columns:
+        r = reason_col("annual_eps")
+        r.loc[out["annual_eps"].isna()] = "TAG_NOT_FOUND"
+        out["annual_eps_missing_reason"] = r
+
+    if "annual_eps_growth" in out.columns:
+        r = reason_col("annual_eps_growth")
+        missing = out["annual_eps_growth"].isna()
+        if "annual_eps_missing_reason" in out.columns:
+            inherited = missing & out["annual_eps"].isna()
+            r.loc[inherited] = out.loc[inherited, "annual_eps_missing_reason"]
+        r.loc[missing & r.isna()] = "NO_COMPARATIVE_AVAILABLE"
+        out["annual_eps_growth_missing_reason"] = r
+
+    return out
 
 
 def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
@@ -180,6 +234,8 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
     if "quarterly_eps_yoy" in wide_df.columns:
         wide_df["quarterly_eps_growth_sign_flip"] = False
         wide_df["quarterly_eps_growth_unstable_base"] = False
+
+    wide_df = _add_missing_reason_metadata(wide_df)
 
     long_path = processed / "fundamentals_point_in_time_long.parquet"
     wide_path = processed / "fundamentals_point_in_time.parquet"
