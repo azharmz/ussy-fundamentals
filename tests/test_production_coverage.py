@@ -14,6 +14,7 @@ def _symbol_rows(symbol: str, annual_sources: int, latest_eps_missing: bool = Fa
             {
                 "symbol": symbol,
                 "fiscal_period_end": period,
+                "quarterly_eps": 1.0 + i / 10,
                 "quarterly_eps_yoy": pd.NA if latest_eps_missing and i == 7 else 0.20 + i / 100,
                 "quarterly_revenue_yoy": 0.10 + i / 100,
                 "annual_eps": 1.0 + source_idx if annual_sources else pd.NA,
@@ -44,6 +45,7 @@ def test_can_slim_full_pass_counts_distinct_annual_sources_not_carried_rows():
     assert row["status"] == "PASS_FULL"
     assert row["annual_years"] == 5
     assert row["quarterly_eps_yoy_usable"] == 8
+    assert row["quarterly_eps_yoy_evaluable"] == 8
     assert row["quarterly_revenue_yoy_usable"] == 8
 
 
@@ -63,6 +65,25 @@ def test_can_slim_allows_one_quarter_eps_staleness_for_q4_policy_gap():
     assert row["status"] == "PASS_FULL"
     assert row["quarterly_eps_yoy_stale_quarters"] == 1
     assert row["quarterly_eps_yoy_usable"] == 7
+
+
+def test_can_slim_nonpositive_eps_base_is_evaluable_not_missing_coverage():
+    wide = _symbol_rows("NEGBASE", annual_sources=5)
+    wide["quarterly_eps_yoy"] = pd.NA
+    wide.loc[wide.index[0], "quarterly_eps_yoy"] = 0.25
+
+    # Prior-year EPS for the four 2025 quarters is nonpositive. Percentage YoY is
+    # intentionally undefined, but the underlying current/prior facts are present.
+    wide.loc[wide.index[:4], "quarterly_eps"] = [-0.10, -0.20, -0.30, -0.40]
+    wide.loc[wide.index[4:], "quarterly_eps"] = [0.05, -0.10, 0.20, 0.30]
+
+    row = can_slim_production_coverage(wide).iloc[0]
+
+    assert row["status"] == "PASS_FULL"
+    assert row["quarterly_eps_yoy_usable"] == 1
+    assert row["quarterly_eps_yoy_nonpositive_base"] == 4
+    assert row["quarterly_eps_yoy_evaluable"] == 5
+    assert row["quarterly_eps_yoy_stale_quarters"] == 0
 
 
 def test_can_slim_fails_short_annual_history_and_material_recent_gap():
