@@ -126,6 +126,44 @@ def build_run_manifest(
     return pd.DataFrame(rows)
 
 
+def combine_production_readiness(manifest: pd.DataFrame, coverage: pd.DataFrame) -> pd.DataFrame:
+    """Account for every requested symbol in one strategy-readiness table.
+
+    Normalized symbols inherit their CAN SLIM production-window status. Symbols that
+    never reached normalized output retain the explicit acquisition/filing taxonomy
+    from the run manifest. This makes the full requested universe auditable with no
+    silent denominator shrinkage.
+    """
+    if manifest.empty:
+        return manifest.copy()
+
+    out = manifest.copy()
+    out["symbol"] = out["symbol"].astype(str).str.upper().str.strip()
+    out["run_status"] = out["status"].astype("string")
+
+    if coverage.empty or "symbol" not in coverage.columns or "status" not in coverage.columns:
+        out["production_status"] = out["run_status"]
+        out.loc[out["run_status"].eq("NORMALIZED"), "production_status"] = "NORMALIZED_NO_COVERAGE"
+        out["failure_class"] = pd.NA
+        return out
+
+    c = coverage.copy()
+    c["symbol"] = c["symbol"].astype(str).str.upper().str.strip()
+    keep = ["symbol", "status"] + (["failure_class"] if "failure_class" in c.columns else [])
+    c = c[keep].drop_duplicates("symbol", keep="last").rename(columns={"status": "coverage_status"})
+    if "failure_class" not in c.columns:
+        c["failure_class"] = pd.NA
+
+    out = out.merge(c, on="symbol", how="left")
+    out["production_status"] = out["run_status"]
+    normalized = out["run_status"].eq("NORMALIZED")
+    out.loc[normalized, "production_status"] = out.loc[normalized, "coverage_status"].fillna(
+        "NORMALIZED_NO_COVERAGE"
+    )
+    out.loc[~normalized, "failure_class"] = out.loc[~normalized, "run_status"]
+    return out.drop(columns=["coverage_status"], errors="ignore")
+
+
 def print_reconciliation(manifest: pd.DataFrame) -> None:
     print("=== UNIVERSE RECONCILIATION ===")
     requested = len(manifest)
@@ -148,6 +186,29 @@ def print_reconciliation(manifest: pd.DataFrame) -> None:
         print("\nDropped symbols:")
         print(failures[["symbol", "cik", "status", "forms_detected"]].to_string(index=False))
     print()
+
+
+def print_requested_universe_readiness(manifest: pd.DataFrame, coverage: pd.DataFrame) -> pd.DataFrame:
+    combined = combine_production_readiness(manifest, coverage)
+    print("=== REQUESTED UNIVERSE PRODUCTION READINESS ===")
+    if combined.empty:
+        print("No requested symbols in run manifest")
+        print()
+        return combined
+
+    print(f"Requested symbols: {len(combined):,}")
+    print("\nStatus summary:")
+    print(combined["production_status"].value_counts().to_string())
+
+    problem = combined[
+        ~combined["production_status"].isin(["PASS_FULL", "PASS_3Y_FALLBACK"])
+    ].copy()
+    if not problem.empty:
+        print("\nNon-ready / unsupported symbols:")
+        show = [c for c in ["symbol", "cik", "production_status", "failure_class"] if c in problem.columns]
+        print(problem[show].to_string(index=False))
+    print()
+    return combined
 
 
 def main() -> None:
