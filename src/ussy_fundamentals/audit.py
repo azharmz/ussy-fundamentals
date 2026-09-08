@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .production_coverage import print_can_slim_production_coverage
+
 
 DEFAULT_WIDE = Path("data/processed/fundamentals_point_in_time.parquet")
 DEFAULT_LONG = Path("data/processed/fundamentals_point_in_time_long.parquet")
@@ -199,6 +201,8 @@ def main() -> None:
             f"{_pct(policy)} policy-excluded | {_pct(unexplained)} other-missing"
         )
     print()
+
+    print_can_slim_production_coverage(wide)
 
     print("=== MISSING REASONS ===")
     for c in metrics:
