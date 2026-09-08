@@ -5,7 +5,7 @@ import pandas as pd
 FORMS = {"10-Q", "10-Q/A", "10-K", "10-K/A"}
 EPS_TAGS = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
 REVENUE_TAGS = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
-NORMALIZER_VERSION = "sec-ca-v0.2.0"
+NORMALIZER_VERSION = "sec-ca-v0.3.0"
 
 
 def _dt(x):
@@ -77,12 +77,35 @@ def _dedupe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _current_period_only(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep the fact for the filing's reported period, not comparative facts re-presented in a later filing."""
+    """Keep current reported-period observations; comparative facts remain available for PIT YoY."""
     if df.empty:
         return df
     report_date = pd.to_datetime(df["report_date"], errors="coerce")
     end = pd.to_datetime(df["end"], errors="coerce")
     return df[report_date.notna() & end.eq(report_date)].copy()
+
+
+def _same_filing_prior(row: pd.Series, all_period_facts: pd.DataFrame):
+    """Find prior-year comparable value as presented in the SAME filing.
+
+    This matters especially for per-share metrics after stock splits: a later filing may
+    retrospectively restate the comparative EPS, while the old filing retains its
+    pre-split value. Using the same accession preserves what the issuer presented at the
+    current filing's availability timestamp without look-ahead.
+    """
+    target_lo = row["fiscal_period_end"] - pd.Timedelta(days=400)
+    target_hi = row["fiscal_period_end"] - pd.Timedelta(days=330)
+    c = all_period_facts[
+        (all_period_facts["metric"] == row["metric"])
+        & (all_period_facts["accession"] == row["accession"])
+        & (all_period_facts["end"] >= target_lo)
+        & (all_period_facts["end"] <= target_hi)
+        & (all_period_facts["duration_days"].between(60, 120, inclusive="both"))
+    ].copy()
+    if c.empty:
+        return None
+    c = c.sort_values(["tag_priority", "is_amendment"], ascending=[True, True])
+    return c.iloc[0]["value"]
 
 
 def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: list[dict]) -> pd.DataFrame:
@@ -94,8 +117,8 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
         return facts
     facts["period_type"] = facts["duration_days"].map(classify_period)
 
-    q = facts[(facts["period_type"] == "quarterly") & facts["form"].isin(["10-Q", "10-Q/A"])].copy()
-    q = _dedupe(_current_period_only(q))
+    all_quarter_facts = facts[(facts["period_type"] == "quarterly") & facts["form"].isin(["10-Q", "10-Q/A"])].copy()
+    q = _dedupe(_current_period_only(all_quarter_facts))
 
     annual = facts[(facts["period_type"] == "annual") & facts["form"].isin(["10-K", "10-K/A"])].copy()
     annual = _dedupe(_current_period_only(annual))
@@ -127,19 +150,33 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
     q["fiscal_period_end"] = q["end"]
     q["normalizer_version"] = NORMALIZER_VERSION
     q["yoy"] = pd.NA
+    q["yoy_source"] = pd.NA
 
     for metric in q["metric"].unique():
         m = q[q["metric"] == metric].sort_values(["fiscal_period_end", "accepted_at"])
         for i, row in m.iterrows():
-            prior = m[(m["fiscal_period_end"] >= row["fiscal_period_end"] - pd.Timedelta(days=400)) & (m["fiscal_period_end"] <= row["fiscal_period_end"] - pd.Timedelta(days=330)) & (m["accepted_at"] <= row["accepted_at"])]
-            if prior.empty:
-                continue
-            prev = prior.sort_values("accepted_at").iloc[-1]["value"]
+            prev = None
+            source = None
+
+            # Preferred: comparative quarter as restated/presented in the same filing.
+            if row.get("period_type") == "quarterly":
+                prev = _same_filing_prior(row, all_quarter_facts)
+                if prev is not None:
+                    source = "SAME_FILING_COMPARATIVE"
+
+            # Fallback for derived Q4 or filings lacking a comparable fact.
+            if prev is None:
+                prior = m[(m["fiscal_period_end"] >= row["fiscal_period_end"] - pd.Timedelta(days=400)) & (m["fiscal_period_end"] <= row["fiscal_period_end"] - pd.Timedelta(days=330)) & (m["accepted_at"] <= row["accepted_at"])]
+                if not prior.empty:
+                    prev = prior.sort_values("accepted_at").iloc[-1]["value"]
+                    source = "PRIOR_PIT_OBSERVATION"
+
             if prev in (None, 0):
                 continue
             if metric == "eps" and prev <= 0:
                 continue
             q.at[i, "yoy"] = row["value"] / prev - 1
+            q.at[i, "yoy_source"] = source
     return q
 
 
