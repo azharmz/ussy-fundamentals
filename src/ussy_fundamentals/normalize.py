@@ -5,7 +5,7 @@ import pandas as pd
 FORMS = {"10-Q", "10-Q/A", "10-K", "10-K/A"}
 EPS_TAGS = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
 REVENUE_TAGS = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
-NORMALIZER_VERSION = "sec-ca-v0.4.0"
+NORMALIZER_VERSION = "sec-ca-v0.4.1"
 
 
 def _dt(x):
@@ -77,7 +77,6 @@ def _dedupe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _current_period_only(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep current reported-period observations; comparative facts remain available for PIT growth."""
     if df.empty:
         return df
     report_date = pd.to_datetime(df["report_date"], errors="coerce")
@@ -85,18 +84,7 @@ def _current_period_only(df: pd.DataFrame) -> pd.DataFrame:
     return df[report_date.notna() & end.eq(report_date)].copy()
 
 
-def _same_filing_prior(
-    row: pd.Series,
-    all_period_facts: pd.DataFrame,
-    min_duration: int,
-    max_duration: int,
-):
-    """Return prior-year comparable value as presented in the SAME filing.
-
-    Same-filing comparatives are preferred because issuers can retrospectively restate
-    per-share figures after stock splits or other presentation changes. This preserves
-    what was knowable at the current filing timestamp without look-ahead.
-    """
+def _same_filing_prior(row: pd.Series, all_period_facts: pd.DataFrame, min_duration: int, max_duration: int):
     target_lo = row["fiscal_period_end"] - pd.Timedelta(days=400)
     target_hi = row["fiscal_period_end"] - pd.Timedelta(days=330)
     c = all_period_facts[
@@ -113,7 +101,6 @@ def _same_filing_prior(
 
 
 def _build_annual_eps_state(all_annual_facts: pd.DataFrame) -> pd.DataFrame:
-    """Create annual EPS observations available at each 10-K acceptance timestamp."""
     if all_annual_facts.empty:
         return pd.DataFrame()
 
@@ -130,7 +117,6 @@ def _build_annual_eps_state(all_annual_facts: pd.DataFrame) -> pd.DataFrame:
     for i, row in current.iterrows():
         prev = _same_filing_prior(row, all_annual_facts, 300, 430)
         source = None
-
         if prev is not None:
             source = "SAME_FILING_COMPARATIVE"
         else:
@@ -142,10 +128,8 @@ def _build_annual_eps_state(all_annual_facts: pd.DataFrame) -> pd.DataFrame:
             if not prior.empty:
                 prev = prior.sort_values("accepted_at").iloc[-1]["annual_eps"]
                 source = "PRIOR_PIT_OBSERVATION"
-
         if prev in (None, 0) or prev <= 0:
             continue
-
         current.at[i, "annual_eps_growth"] = row["annual_eps"] / prev - 1
         current.at[i, "annual_growth_source"] = source
 
@@ -153,7 +137,6 @@ def _build_annual_eps_state(all_annual_facts: pd.DataFrame) -> pd.DataFrame:
 
 
 def _attach_annual_state(q: pd.DataFrame, annual_state: pd.DataFrame) -> pd.DataFrame:
-    """Carry the latest known annual EPS state forward onto every quarterly observation."""
     out = q.copy()
     cols = [
         "annual_eps",
@@ -170,12 +153,7 @@ def _attach_annual_state(q: pd.DataFrame, annual_state: pd.DataFrame) -> pd.Data
         return out
 
     state = annual_state[[
-        "accepted_at",
-        "filed_at",
-        "accession",
-        "annual_eps",
-        "annual_eps_growth",
-        "annual_growth_source",
+        "accepted_at", "filed_at", "accession", "annual_eps", "annual_eps_growth", "annual_growth_source",
     ]].copy().sort_values("accepted_at")
 
     for i, row in out.iterrows():
@@ -243,12 +221,10 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
         for i, row in m.iterrows():
             prev = None
             source = None
-
             if row.get("period_type") == "quarterly":
                 prev = _same_filing_prior(row, all_quarter_facts, 60, 120)
                 if prev is not None:
                     source = "SAME_FILING_COMPARATIVE"
-
             if prev is None:
                 prior = m[
                     (m["fiscal_period_end"] >= row["fiscal_period_end"] - pd.Timedelta(days=400))
@@ -258,7 +234,6 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
                 if not prior.empty:
                     prev = prior.sort_values("accepted_at").iloc[-1]["value"]
                     source = "PRIOR_PIT_OBSERVATION"
-
             if prev in (None, 0):
                 continue
             if metric == "eps" and prev <= 0:
@@ -274,23 +249,28 @@ def wide_table(long_df: pd.DataFrame) -> pd.DataFrame:
         return long_df
 
     state_cols = [
-        "annual_eps",
-        "annual_eps_growth",
-        "annual_eps_accepted_at",
-        "annual_eps_filed_at",
-        "annual_eps_source_accession",
-        "annual_growth_source",
+        "annual_eps", "annual_eps_growth", "annual_eps_accepted_at", "annual_eps_filed_at",
+        "annual_eps_source_accession", "annual_growth_source",
     ]
     keys = [
-        "symbol", "cik", "accepted_at", "filed_at", "accession", "form",
-        "fiscal_period_end", "fp", "is_amendment", "normalizer_version",
+        "symbol", "cik", "accepted_at", "filed_at", "accession", "form", "fiscal_period_end", "fp",
+        "is_amendment", "normalizer_version",
     ] + state_cols
 
-    values = long_df.pivot_table(index=keys, columns="metric", values="value", aggfunc="first", dropna=False).reset_index()
-    yoy = long_df.pivot_table(index=keys, columns="metric", values="yoy", aggfunc="first", dropna=False).reset_index().rename(
+    base = long_df[keys + ["metric", "value", "yoy"]].copy()
+    grouped = base.groupby(keys + ["metric"], dropna=False, as_index=False).agg(
+        value=("value", "first"),
+        yoy=("yoy", "first"),
+    )
+
+    values = grouped.pivot(index=keys, columns="metric", values="value").reset_index()
+    yoy = grouped.pivot(index=keys, columns="metric", values="yoy").reset_index().rename(
         columns={"eps": "quarterly_eps_yoy", "revenue": "quarterly_revenue_yoy"}
     )
-    out = values.merge(yoy, on=keys, how="outer").rename(columns={"eps": "quarterly_eps", "revenue": "quarterly_revenue"})
+
+    out = values.merge(yoy, on=keys, how="outer").rename(
+        columns={"eps": "quarterly_eps", "revenue": "quarterly_revenue"}
+    )
     out["C_eps_25"] = out.get("quarterly_eps_yoy", pd.Series(index=out.index, dtype="float64")) >= 0.25
     out["C_revenue_25"] = out.get("quarterly_revenue_yoy", pd.Series(index=out.index, dtype="float64")) >= 0.25
     out["A_eps_20"] = out.get("annual_eps_growth", pd.Series(index=out.index, dtype="float64")) >= 0.20
