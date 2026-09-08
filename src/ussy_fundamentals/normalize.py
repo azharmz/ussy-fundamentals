@@ -5,7 +5,7 @@ import pandas as pd
 FORMS = {"10-Q", "10-Q/A", "10-K", "10-K/A"}
 EPS_TAGS = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
 REVENUE_TAGS = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
-NORMALIZER_VERSION = "sec-ca-v0.1.0"
+NORMALIZER_VERSION = "sec-ca-v0.2.0"
 
 
 def _dt(x):
@@ -44,6 +44,7 @@ def fact_rows(companyfacts: dict, tags: list[str], metric: str, filings: dict[st
                     "duration_days": _duration_days(f.get("start"), f.get("end")),
                     "filed_at": _dt(meta.get("filingDate") or f.get("filed")),
                     "accepted_at": _dt(meta.get("acceptanceDateTime") or meta.get("acceptanceDatetime")),
+                    "report_date": _dt(meta.get("reportDate")),
                     "accession": f.get("accn"),
                     "form": f.get("form"),
                     "fy": f.get("fy"),
@@ -75,6 +76,15 @@ def _dedupe(df: pd.DataFrame) -> pd.DataFrame:
     return df.groupby(["metric", "accession", "end"], dropna=False, as_index=False).head(1)
 
 
+def _current_period_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep the fact for the filing's reported period, not comparative facts re-presented in a later filing."""
+    if df.empty:
+        return df
+    report_date = pd.to_datetime(df["report_date"], errors="coerce")
+    end = pd.to_datetime(df["end"], errors="coerce")
+    return df[report_date.notna() & end.eq(report_date)].copy()
+
+
 def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: list[dict]) -> pd.DataFrame:
     idx = accession_index(filing_rows)
     eps = fact_rows(companyfacts, EPS_TAGS, "eps", idx)
@@ -84,8 +94,11 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
         return facts
     facts["period_type"] = facts["duration_days"].map(classify_period)
 
-    q = _dedupe(facts[(facts["period_type"] == "quarterly") & facts["form"].isin(["10-Q", "10-Q/A"])].copy())
-    annual = _dedupe(facts[(facts["period_type"] == "annual") & facts["form"].isin(["10-K", "10-K/A"])].copy())
+    q = facts[(facts["period_type"] == "quarterly") & facts["form"].isin(["10-Q", "10-Q/A"])].copy()
+    q = _dedupe(_current_period_only(q))
+
+    annual = facts[(facts["period_type"] == "annual") & facts["form"].isin(["10-K", "10-K/A"])].copy()
+    annual = _dedupe(_current_period_only(annual))
 
     q4_rows = []
     for _, fy in annual.iterrows():
