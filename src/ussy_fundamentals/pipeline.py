@@ -7,6 +7,7 @@ import pandas as pd
 from .annual_fallback import fill_missing_annual_eps
 from . import normalize as normalize_mod
 from .normalize import normalize_company, wide_table
+from .reconcile import build_run_manifest, print_reconciliation
 from .sec_client import SecClient, companyfacts, submissions, ticker_mapping
 
 
@@ -309,8 +310,13 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
 
     long_path = processed / "fundamentals_point_in_time_long.parquet"
     wide_path = processed / "fundamentals_point_in_time.parquet"
+    manifest_path = processed / "fundamentals_run_manifest.parquet"
     long_df.to_parquet(long_path, index=False)
     wide_df.to_parquet(wide_path, index=False)
+
+    manifest = build_run_manifest(universe_path, wide_path, data_dir)
+    manifest.to_parquet(manifest_path, index=False)
+    print_reconciliation(manifest)
     return long_path, wide_path
 
 
@@ -319,9 +325,11 @@ def main():
     parser.add_argument("--universe", default="data/universe.sample.csv")
     parser.add_argument("--data-dir", default="data")
     args = parser.parse_args()
-    long_path, wide_path = run(Path(args.universe), Path(args.data_dir))
+    data_dir = Path(args.data_dir)
+    long_path, wide_path = run(Path(args.universe), data_dir)
     print(f"Wrote {long_path}")
     print(f"Wrote {wide_path}")
+    print(f"Wrote {data_dir / 'processed' / 'fundamentals_run_manifest.parquet'}")
 
 
 if __name__ == "__main__":
