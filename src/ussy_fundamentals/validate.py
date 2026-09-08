@@ -16,7 +16,6 @@ def _pct(x):
 
 
 def _utc_naive(series: pd.Series) -> pd.Series:
-    """Parse datetimes consistently, then drop timezone for safe comparisons."""
     parsed = pd.to_datetime(series, errors="coerce", utc=True)
     return parsed.dt.tz_convert(None)
 
@@ -46,6 +45,10 @@ def main() -> None:
         "quarterly_revenue",
         "quarterly_eps_yoy",
         "quarterly_revenue_yoy",
+        "annual_eps",
+        "annual_eps_growth",
+        "annual_eps_accepted_at",
+        "A_eps_20",
     ]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -61,10 +64,11 @@ def main() -> None:
     accepted = _utc_naive(df["accepted_at"])
     filed = _utc_naive(df["filed_at"])
     period_end = _utc_naive(df["fiscal_period_end"])
+    annual_accepted = _utc_naive(df["annual_eps_accepted_at"])
 
     print(f"  accepted_at < fiscal_period_end : {(accepted < period_end).sum():,}")
     print(f"  filed_at < fiscal_period_end    : {(filed < period_end).sum():,}")
-    print(f"  accepted_at < filed_at          : {(accepted < filed).sum():,}")
+    print(f"  annual accepted > row accepted : {(annual_accepted > accepted).sum():,}")
     print(f"  duplicate full rows             : {df.duplicated().sum():,}")
 
     print()
@@ -82,14 +86,16 @@ def main() -> None:
             "quarterly_eps_yoy",
             "quarterly_revenue",
             "quarterly_revenue_yoy",
+            "annual_eps",
+            "annual_eps_growth",
+            "A_eps_20",
         ]
         existing = [c for c in cols if c in s.columns]
         view = s[existing].copy()
 
-        if "quarterly_eps_yoy" in view:
-            view["quarterly_eps_yoy"] = view["quarterly_eps_yoy"].map(_pct)
-        if "quarterly_revenue_yoy" in view:
-            view["quarterly_revenue_yoy"] = view["quarterly_revenue_yoy"].map(_pct)
+        for c in ["quarterly_eps_yoy", "quarterly_revenue_yoy", "annual_eps_growth"]:
+            if c in view:
+                view[c] = view[c].map(_pct)
 
         print(view.to_string(index=False))
         print()
