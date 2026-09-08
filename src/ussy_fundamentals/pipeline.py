@@ -27,7 +27,6 @@ def _symbol_ciks(symbol: str, current_cik: str, history: pd.DataFrame) -> list[s
     if not history.empty:
         extra = history.loc[history["symbol"] == symbol, "cik"].dropna().astype(str).tolist()
         ciks.extend(extra)
-    # preserve order while deduplicating
     return list(dict.fromkeys(ciks))
 
 
@@ -46,7 +45,12 @@ def _drop_nonadditive_derived_eps(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
-    """Carry the latest known annual state across predecessor/successor CIK boundaries."""
+    """Carry only annual state that was actually public by each row's accepted_at.
+
+    This function enforces a hard PIT invariant across predecessor/successor CIKs:
+    annual_eps_accepted_at must never be later than the observation accepted_at.
+    Any pre-existing future state is cleared before recomputing the carry-forward.
+    """
     if df.empty or "annual_eps" not in df.columns:
         return df
 
@@ -62,23 +66,53 @@ def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
     pieces = []
     for symbol, s in df.groupby("symbol", sort=False):
         s = s.sort_values(["accepted_at", "fiscal_period_end"]).copy()
-        state = s[s["annual_eps"].notna()][["accepted_at"] + state_cols].copy()
+        row_accepted = pd.to_datetime(s["accepted_at"], errors="coerce", utc=True)
+        annual_accepted = pd.to_datetime(s["annual_eps_accepted_at"], errors="coerce", utc=True)
+
+        # Remove any state that violates PIT before building the canonical state timeline.
+        future = annual_accepted.notna() & row_accepted.notna() & annual_accepted.gt(row_accepted)
+        if future.any():
+            s.loc[future, state_cols] = pd.NA
+
+        # Canonical annual events are keyed by the annual state's own acceptance timestamp,
+        # not by the quarterly row on which they happen to be carried.
+        state = s[s["annual_eps"].notna() & s["annual_eps_accepted_at"].notna()][state_cols].copy()
         if state.empty:
             pieces.append(s)
             continue
 
-        # For a given acceptance timestamp keep the most complete latest annual state.
-        state = state.sort_values("accepted_at").groupby("accepted_at", as_index=False).last()
-
-        left = s.sort_values("accepted_at").copy()
-        carry = pd.merge_asof(
-            left[["accepted_at"]],
-            state.sort_values("accepted_at"),
-            on="accepted_at",
-            direction="backward",
+        state["state_accepted_at"] = pd.to_datetime(state["annual_eps_accepted_at"], errors="coerce", utc=True)
+        state = state.dropna(subset=["state_accepted_at"])
+        state = (
+            state.sort_values("state_accepted_at")
+            .groupby("state_accepted_at", as_index=False)
+            .last()
         )
+
+        left = s.copy()
+        left["_row_accepted_at"] = pd.to_datetime(left["accepted_at"], errors="coerce", utc=True)
+        carry = pd.merge_asof(
+            left[["_row_accepted_at"]].sort_values("_row_accepted_at"),
+            state.sort_values("state_accepted_at"),
+            left_on="_row_accepted_at",
+            right_on="state_accepted_at",
+            direction="backward",
+            allow_exact_matches=True,
+        ).set_index(left.sort_values("_row_accepted_at").index)
+
+        # Rebuild annual state from the canonical PIT timeline, rather than preserving
+        # potentially inconsistent per-CIK carry-forward values.
         for c in state_cols:
-            left[c] = left[c].where(left[c].notna(), carry[c])
+            left[c] = carry.reindex(left.index)[c]
+
+        # Defensive invariant check: if anything still points to the future, clear it.
+        final_annual_accepted = pd.to_datetime(left["annual_eps_accepted_at"], errors="coerce", utc=True)
+        final_row_accepted = pd.to_datetime(left["accepted_at"], errors="coerce", utc=True)
+        bad = final_annual_accepted.notna() & final_row_accepted.notna() & final_annual_accepted.gt(final_row_accepted)
+        if bad.any():
+            left.loc[bad, state_cols] = pd.NA
+
+        left = left.drop(columns=["_row_accepted_at"], errors="ignore")
         pieces.append(left)
 
     return pd.concat(pieces, ignore_index=True)
@@ -93,7 +127,6 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
     for p in [mapping_dir, submissions_dir, companyfacts_dir, processed]:
         p.mkdir(parents=True, exist_ok=True)
 
-    # Conservative taxonomy extensions. Provenance is still preserved in the long table.
     for tag in ["IncomeLossFromContinuingOperationsPerDilutedShare"]:
         if tag not in normalize_mod.EPS_TAGS:
             normalize_mod.EPS_TAGS.append(tag)
@@ -126,8 +159,6 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
         raise RuntimeError("No fundamentals were normalized")
 
     long_df = pd.concat(outputs, ignore_index=True)
-
-    # Remove exact observation duplicates that can occur around successor/predecessor filings.
     dedupe_cols = [
         c for c in ["symbol", "metric", "accepted_at", "fiscal_period_end", "value", "accession"]
         if c in long_df.columns
@@ -137,7 +168,6 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
 
     wide_df = wide_table(long_df)
 
-    # Preserve extreme growth values but flag them for audit/research slicing.
     for col, flag_col in [
         ("quarterly_eps_yoy", "quarterly_eps_yoy_extreme"),
         ("quarterly_revenue_yoy", "quarterly_revenue_yoy_extreme"),
@@ -147,7 +177,6 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
         wide_df[col] = values
         wide_df[flag_col] = values.abs().ge(3.0).fillna(False)
 
-    # Quality flags: keep values, but expose unstable/sign-flip EPS growth explicitly.
     if "quarterly_eps_yoy" in wide_df.columns:
         wide_df["quarterly_eps_growth_sign_flip"] = False
         wide_df["quarterly_eps_growth_unstable_base"] = False
