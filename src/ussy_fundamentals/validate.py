@@ -15,6 +15,12 @@ def _pct(x):
     return f"{x:.1%}"
 
 
+def _utc_naive(series: pd.Series) -> pd.Series:
+    """Parse datetimes consistently, then drop timezone for safe comparisons."""
+    parsed = pd.to_datetime(series, errors="coerce", utc=True)
+    return parsed.dt.tz_convert(None)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate USSY SEC PIT fundamentals output")
     parser.add_argument("--path", type=Path, default=DEFAULT_PATH)
@@ -52,9 +58,9 @@ def main() -> None:
 
     print()
     print("Basic PIT checks:")
-    accepted = pd.to_datetime(df["accepted_at"], errors="coerce")
-    filed = pd.to_datetime(df["filed_at"], errors="coerce")
-    period_end = pd.to_datetime(df["fiscal_period_end"], errors="coerce")
+    accepted = _utc_naive(df["accepted_at"])
+    filed = _utc_naive(df["filed_at"])
+    period_end = _utc_naive(df["fiscal_period_end"])
 
     print(f"  accepted_at < fiscal_period_end : {(accepted < period_end).sum():,}")
     print(f"  filed_at < fiscal_period_end    : {(filed < period_end).sum():,}")
