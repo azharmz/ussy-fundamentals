@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.env
+.DS_Store
+
+# Generated data
+/data/raw/
+/data/processed/
+!/data/universe.sample.csv
