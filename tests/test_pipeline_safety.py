@@ -1,6 +1,6 @@
 import pandas as pd
 
-from ussy_fundamentals.audit import _cross_cik_overlaps
+from ussy_fundamentals.audit import _amendment_preservation_issues, _cross_cik_overlaps
 from ussy_fundamentals.pipeline import (
     _add_missing_reason_metadata,
     _drop_nonadditive_derived_eps,
@@ -122,3 +122,44 @@ def test_cross_cik_overlap_detects_same_period_metric_across_ciks():
     assert len(overlaps) == 2
     assert set(overlaps["metric"]) == {"revenue"}
     assert set(overlaps["cik"]) == {"0000034088", "0002115436"}
+
+
+def test_amendment_audit_passes_when_original_is_preserved():
+    long = pd.DataFrame([
+        {
+            "symbol": "TEST",
+            "fiscal_period_end": "2025-03-31",
+            "metric": "eps",
+            "accepted_at": "2025-05-01T12:00:00Z",
+            "accession": "original",
+            "is_amendment": False,
+            "value": 1.0,
+        },
+        {
+            "symbol": "TEST",
+            "fiscal_period_end": "2025-03-31",
+            "metric": "eps",
+            "accepted_at": "2025-06-01T12:00:00Z",
+            "accession": "amended",
+            "is_amendment": True,
+            "value": 1.1,
+        },
+    ])
+    assert _amendment_preservation_issues(long).empty
+
+
+def test_amendment_audit_surfaces_missing_original():
+    long = pd.DataFrame([
+        {
+            "symbol": "TEST",
+            "fiscal_period_end": "2025-03-31",
+            "metric": "eps",
+            "accepted_at": "2025-06-01T12:00:00Z",
+            "accession": "amended",
+            "is_amendment": True,
+            "value": 1.1,
+        },
+    ])
+    issues = _amendment_preservation_issues(long)
+    assert len(issues) == 1
+    assert issues.iloc[0]["accession"] == "amended"
