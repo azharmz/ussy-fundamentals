@@ -78,6 +78,29 @@ def _print_normalized_observations(normalized: pd.DataFrame, metric: str) -> Non
     print(q[cols].tail(30).to_string(index=False))
 
 
+def _print_duration_reject_sample(candidates: pd.DataFrame, limit: int = 15) -> None:
+    rejected = candidates[candidates["decision"] == "REJECT_DURATION"].copy()
+    if rejected.empty:
+        return
+
+    # Prioritize rows whose fact end equals the filing report date. These are the rejects
+    # most likely to represent a legitimate current-period stub rather than comparative noise.
+    rejected["is_current_period"] = rejected["end"].eq(rejected["report_date"])
+    rejected = rejected.sort_values(
+        ["is_current_period", "accepted_at", "end"], ascending=[False, False, False]
+    )
+
+    print("\n=== REJECT_DURATION SAMPLE ===")
+    print("Current-period rejects are shown first; inspect for legitimate stub/corporate-action periods.")
+    cols = [
+        "cik", "end", "report_date", "accepted_at", "form", "fy", "fp",
+        "duration_days", "period_type", "tag", "unit", "value", "accession",
+        "is_current_period",
+    ]
+    cols = [col for col in cols if col in rejected.columns]
+    print(rejected[cols].head(limit).to_string(index=False))
+
+
 def diagnose(symbol: str, metric: str, data_dir: Path) -> None:
     symbol = symbol.upper().strip()
     tags = _prepare_tags(metric)
@@ -141,6 +164,8 @@ def diagnose(symbol: str, metric: str, data_dir: Path) -> None:
         "period_type", "tag", "unit", "value", "decision", "accession",
     ]
     print(c.sort_values(["end", "accepted_at"])[cols].tail(60).to_string(index=False))
+
+    _print_duration_reject_sample(c)
 
     if normalized_parts:
         n = pd.concat(normalized_parts, ignore_index=True)
