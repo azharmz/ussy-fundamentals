@@ -10,7 +10,7 @@ REVENUE_TAGS = [
     "SalesRevenueNet",
     "SalesRevenueGoodsNet",
 ]
-NORMALIZER_VERSION = "sec-ca-v0.5.0"
+NORMALIZER_VERSION = "sec-ca-v0.6.0"
 
 
 def _dt(x):
@@ -82,19 +82,29 @@ def _dedupe(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _current_period_only(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep facts that can defensibly represent the filing's current reported period.
+
+    SEC Companyfacts can carry older comparative facts in later accessions. Matching
+    end == reportDate is necessary but not sufficient when historical submission metadata
+    is imperfect. For ordinary (non-amended) filings, reject observations accepted more
+    than 200 days after period end. Amendments remain valid later restatement events.
+    """
     if df.empty:
         return df
     report_date = pd.to_datetime(df["report_date"], errors="coerce")
     end = pd.to_datetime(df["end"], errors="coerce")
-    return df[report_date.notna() & end.eq(report_date)].copy()
+    accepted = pd.to_datetime(df["accepted_at"], errors="coerce", utc=True)
+    end_utc = pd.to_datetime(df["end"], errors="coerce", utc=True)
+    amendment = df.get("is_amendment", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+
+    matches_report = report_date.notna() & end.eq(report_date)
+    lag_days = (accepted - end_utc).dt.total_seconds() / 86400.0
+    plausible_lag = amendment | accepted.isna() | lag_days.between(0, 200, inclusive="both")
+    return df[matches_report & plausible_lag].copy()
 
 
 def _same_filing_prior(row: pd.Series, all_period_facts: pd.DataFrame, min_duration: int, max_duration: int):
-    """Find prior-year comparable as presented in the same accession.
-
-    Prefer exact same XBRL concept and unit. This prevents mixing economically different
-    per-share concepts or units when multiple tags coexist in one filing.
-    """
+    """Find prior-year comparable as presented in the same accession."""
     target_lo = row["fiscal_period_end"] - pd.Timedelta(days=400)
     target_hi = row["fiscal_period_end"] - pd.Timedelta(days=330)
     base = all_period_facts[
@@ -117,14 +127,7 @@ def _same_filing_prior(row: pd.Series, all_period_facts: pd.DataFrame, min_durat
 
 
 def _build_ytd_quarters(facts: pd.DataFrame, direct_q: pd.DataFrame) -> pd.DataFrame:
-    """Reconstruct Q2/Q3 from cumulative 6M/9M facts when direct quarter facts are absent.
-
-    Q2 = H1 - Q1
-    Q3 = 9M - H1
-
-    Reconstruction is restricted to the same metric/tag/unit and to information available
-    no later than the filing being reconstructed.
-    """
+    """Reconstruct Q2/Q3 from cumulative 6M/9M facts when direct quarter facts are absent."""
     if facts.empty:
         return pd.DataFrame()
 
@@ -161,7 +164,6 @@ def _build_ytd_quarters(facts: pd.DataFrame, direct_q: pd.DataFrame) -> pd.DataF
             value = row["value"] - q1.iloc[-1]["value"]
             fp = "Q2"
             derived_from = "H1_MINUS_Q1"
-
         else:
             h1 = same[
                 (same["period_type"] == "half_year")
@@ -174,8 +176,6 @@ def _build_ytd_quarters(facts: pd.DataFrame, direct_q: pd.DataFrame) -> pd.DataF
             fp = "Q3"
             derived_from = "9M_MINUS_H1"
 
-        # Do not add a derived observation when a direct quarter already exists for this
-        # metric and report end.
         exists = direct[(direct["metric"] == row["metric"]) & (direct["end"] == row["end"])]
         if not exists.empty:
             continue
@@ -275,8 +275,19 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
         return facts
     facts["period_type"] = facts["duration_days"].map(classify_period)
 
-    all_quarter_facts = facts[(facts["period_type"] == "quarterly") & facts["form"].isin(["10-Q", "10-Q/A"])].copy()
-    q = _dedupe(_current_period_only(all_quarter_facts))
+    # Direct discrete quarters can be reported in either 10-Q (Q1-Q3) or 10-K (Q4).
+    direct_quarter_facts = facts[
+        (facts["period_type"] == "quarterly")
+        & facts["form"].isin(["10-Q", "10-Q/A", "10-K", "10-K/A"])
+    ].copy()
+    direct_quarter_facts = _current_period_only(direct_quarter_facts)
+    direct_quarter_facts.loc[
+        direct_quarter_facts["form"].isin(["10-K", "10-K/A"]), "period_type"
+    ] = "quarterly_direct_q4"
+    direct_quarter_facts.loc[
+        direct_quarter_facts["form"].isin(["10-K", "10-K/A"]), "fp"
+    ] = "Q4"
+    q = _dedupe(direct_quarter_facts)
 
     ytd_q = _build_ytd_quarters(facts, q)
     if not ytd_q.empty:
@@ -291,6 +302,16 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
     for _, fy in annual.iterrows():
         if pd.isna(fy["accepted_at"]):
             continue
+
+        # Never derive Q4 when a direct discrete Q4 exists for the same metric/end.
+        direct_q4 = q[
+            (q["metric"] == fy["metric"])
+            & (q["end"] == fy["end"])
+            & (q["period_type"] == "quarterly_direct_q4")
+        ]
+        if not direct_q4.empty:
+            continue
+
         prior = q[
             (q["metric"] == fy["metric"])
             & (q["tag"] == fy["tag"])
