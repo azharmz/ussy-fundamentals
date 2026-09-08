@@ -54,6 +54,46 @@ def _distinct_annual_sources(symbol_rows: pd.DataFrame) -> pd.DataFrame:
     return annual.drop_duplicates("_annual_source", keep="last")
 
 
+def _eps_nonpositive_base_periods(symbol_rows: pd.DataFrame, recent: pd.DataFrame) -> list[pd.Timestamp]:
+    """Return recent periods whose EPS YoY is intentionally non-numeric.
+
+    normalize.py deliberately does not calculate percentage EPS growth when the
+    prior-year EPS denominator is <= 0. That is a feature-semantics decision, not a
+    data-coverage failure. For production readiness, count such a period as evaluable
+    when both the current-quarter EPS and a prior-year EPS observation are present.
+    """
+    if "quarterly_eps" not in symbol_rows.columns or "quarterly_eps_yoy" not in recent.columns:
+        return []
+
+    s = symbol_rows.copy()
+    s["fiscal_period_end"] = pd.to_datetime(s["fiscal_period_end"], errors="coerce")
+    out: list[pd.Timestamp] = []
+
+    candidates = recent[
+        recent["quarterly_eps_yoy"].isna() & recent["quarterly_eps"].notna()
+    ].copy()
+
+    for period in candidates["fiscal_period_end"].dropna().unique():
+        period = pd.Timestamp(period)
+        prior = s[
+            (s["fiscal_period_end"] >= period - pd.Timedelta(days=400))
+            & (s["fiscal_period_end"] <= period - pd.Timedelta(days=330))
+            & s["quarterly_eps"].notna()
+        ].copy()
+        if prior.empty:
+            continue
+
+        prior = prior.sort_values("fiscal_period_end")
+        prior_value = prior.iloc[-1]["quarterly_eps"]
+        try:
+            if float(prior_value) <= 0:
+                out.append(period)
+        except (TypeError, ValueError):
+            continue
+
+    return sorted(set(out))
+
+
 def can_slim_production_coverage(
     wide: pd.DataFrame,
     quarterly_window: int = CAN_SLIM_QUARTERLY_WINDOW,
@@ -66,10 +106,14 @@ def can_slim_production_coverage(
 
     The audit is deliberately strategy-aware rather than a full-history completeness
     test. Quarterly readiness is based only on the most recent fiscal periods and
-    requires two usable YoY observations for both EPS and revenue so that latest,
-    previous, and simple acceleration logic are possible. A one-quarter staleness
-    allowance keeps the intentional Q4 EPS exclusion policy from turning every legacy
-    or policy gap into a production failure.
+    requires two evaluable observations for EPS and two usable YoY observations for
+    revenue so that latest, previous, and simple acceleration logic are possible.
+
+    EPS percentage growth is intentionally undefined when prior-year EPS <= 0. Those
+    periods count as evaluable coverage when both current and prior EPS facts exist;
+    downstream strategy logic can treat the negative-base/turnaround state separately.
+    A one-quarter staleness allowance keeps the intentional Q4 EPS exclusion policy from
+    turning every policy gap into a production failure.
 
     Annual readiness counts distinct source filings, not carried-forward rows:
     5+ years -> PASS_FULL, 3-4 years -> PASS_3Y_FALLBACK, <3 years -> failure.
@@ -92,28 +136,50 @@ def can_slim_production_coverage(
 
         metric_stats: dict[str, int | pd.Timestamp | None] = {}
         failures: list[str] = []
-        for metric, label in [
-            ("quarterly_eps_yoy", "EPS_YOY"),
-            ("quarterly_revenue_yoy", "REVENUE_YOY"),
-        ]:
-            if metric in recent.columns:
-                usable_periods = sorted(
-                    recent.loc[recent[metric].notna(), "fiscal_period_end"].dropna().unique()
-                )
-            else:
-                usable_periods = []
 
-            count = len(usable_periods)
-            latest_usable = pd.Timestamp(usable_periods[-1]) if usable_periods else pd.NaT
-            stale = _quarter_distance(latest_period, latest_usable)
-            metric_stats[f"{metric}_usable"] = count
-            metric_stats[f"{metric}_latest_period"] = latest_usable
-            metric_stats[f"{metric}_stale_quarters"] = stale
+        # EPS: distinguish numeric YoY from intentional nonpositive-base cases.
+        if "quarterly_eps_yoy" in recent.columns:
+            eps_numeric_periods = sorted(
+                recent.loc[recent["quarterly_eps_yoy"].notna(), "fiscal_period_end"].dropna().unique()
+            )
+        else:
+            eps_numeric_periods = []
+        eps_nonpositive_base_periods = _eps_nonpositive_base_periods(s, recent)
+        eps_evaluable_periods = sorted(
+            set(pd.Timestamp(p) for p in eps_numeric_periods)
+            | set(eps_nonpositive_base_periods)
+        )
+        eps_latest = eps_evaluable_periods[-1] if eps_evaluable_periods else pd.NaT
+        eps_stale = _quarter_distance(latest_period, eps_latest)
+        metric_stats["quarterly_eps_yoy_usable"] = len(eps_numeric_periods)
+        metric_stats["quarterly_eps_yoy_nonpositive_base"] = len(eps_nonpositive_base_periods)
+        metric_stats["quarterly_eps_yoy_evaluable"] = len(eps_evaluable_periods)
+        metric_stats["quarterly_eps_yoy_latest_period"] = eps_latest
+        metric_stats["quarterly_eps_yoy_stale_quarters"] = eps_stale
 
-            if count < required_yoy_observations:
-                failures.append(f"QUARTERLY_{label}_INSUFFICIENT")
-            elif stale is None or stale > max_stale_quarters:
-                failures.append(f"QUARTERLY_{label}_STALE")
+        if len(eps_evaluable_periods) < required_yoy_observations:
+            failures.append("QUARTERLY_EPS_YOY_INSUFFICIENT")
+        elif eps_stale is None or eps_stale > max_stale_quarters:
+            failures.append("QUARTERLY_EPS_YOY_STALE")
+
+        # Revenue: ordinary numeric YoY availability is sufficient.
+        if "quarterly_revenue_yoy" in recent.columns:
+            revenue_usable_periods = sorted(
+                recent.loc[recent["quarterly_revenue_yoy"].notna(), "fiscal_period_end"].dropna().unique()
+            )
+        else:
+            revenue_usable_periods = []
+        revenue_count = len(revenue_usable_periods)
+        revenue_latest = pd.Timestamp(revenue_usable_periods[-1]) if revenue_usable_periods else pd.NaT
+        revenue_stale = _quarter_distance(latest_period, revenue_latest)
+        metric_stats["quarterly_revenue_yoy_usable"] = revenue_count
+        metric_stats["quarterly_revenue_yoy_latest_period"] = revenue_latest
+        metric_stats["quarterly_revenue_yoy_stale_quarters"] = revenue_stale
+
+        if revenue_count < required_yoy_observations:
+            failures.append("QUARTERLY_REVENUE_YOY_INSUFFICIENT")
+        elif revenue_stale is None or revenue_stale > max_stale_quarters:
+            failures.append("QUARTERLY_REVENUE_YOY_STALE")
 
         annual = _distinct_annual_sources(s)
         annual_years = len(annual)
@@ -149,7 +215,7 @@ def print_can_slim_production_coverage(wide: pd.DataFrame) -> pd.DataFrame:
     print("=== CAN SLIM PRODUCTION COVERAGE ===")
     print(
         f"Quarterly window: last {CAN_SLIM_QUARTERLY_WINDOW} fiscal quarters | "
-        f"need >= {CAN_SLIM_REQUIRED_YOY_OBSERVATIONS} usable EPS YoY and revenue YoY | "
+        f"need >= {CAN_SLIM_REQUIRED_YOY_OBSERVATIONS} evaluable EPS periods and usable revenue YoY | "
         f"max staleness {CAN_SLIM_MAX_STALE_QUARTERS} quarter"
     )
     print(
@@ -165,6 +231,11 @@ def print_can_slim_production_coverage(wide: pd.DataFrame) -> pd.DataFrame:
     print("\nStatus summary:")
     print(coverage["status"].value_counts().to_string())
 
+    nonpositive = coverage["quarterly_eps_yoy_nonpositive_base"].fillna(0).astype(int)
+    if nonpositive.sum() > 0:
+        print("\nEPS YoY nonpositive-base periods (data present; percentage intentionally undefined):")
+        print(f"Periods: {int(nonpositive.sum())} | Symbols: {int((nonpositive > 0).sum())}")
+
     failures = coverage[coverage["status"] == "FAIL_PRODUCTION_COVERAGE"]
     if not failures.empty:
         print("\nFailure classes:")
@@ -175,6 +246,8 @@ def print_can_slim_production_coverage(wide: pd.DataFrame) -> pd.DataFrame:
             "symbol",
             "quarter_periods_present",
             "quarterly_eps_yoy_usable",
+            "quarterly_eps_yoy_nonpositive_base",
+            "quarterly_eps_yoy_evaluable",
             "quarterly_eps_yoy_stale_quarters",
             "quarterly_revenue_yoy_usable",
             "quarterly_revenue_yoy_stale_quarters",
