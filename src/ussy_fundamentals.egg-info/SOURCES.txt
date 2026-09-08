@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+src/ussy_fundamentals/__init__.py
+src/ussy_fundamentals/normalize.py
+src/ussy_fundamentals/pipeline.py
+src/ussy_fundamentals/sec_client.py
+src/ussy_fundamentals.egg-info/PKG-INFO
+src/ussy_fundamentals.egg-info/SOURCES.txt
+src/ussy_fundamentals.egg-info/dependency_links.txt
+src/ussy_fundamentals.egg-info/requires.txt
+src/ussy_fundamentals.egg-info/top_level.txt
+tests/test_normalize.py
