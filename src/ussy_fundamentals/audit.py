@@ -8,6 +8,7 @@ import pandas as pd
 
 DEFAULT_WIDE = Path("data/processed/fundamentals_point_in_time.parquet")
 DEFAULT_LONG = Path("data/processed/fundamentals_point_in_time_long.parquet")
+POLICY_REASONS = {"Q4_EXCLUDED_POLICY"}
 
 
 def _pct(x: float) -> str:
@@ -29,6 +30,45 @@ def _print_missing_by_symbol(df: pd.DataFrame, column: str, topn: int = 15) -> N
     print(f"  {column}:")
     for symbol, rate in missing.items():
         print(f"    {symbol:8s} {_pct(rate)}")
+
+
+def _reason_column(metric: str) -> str:
+    return f"{metric}_missing_reason"
+
+
+def _print_reason_breakdown(wide: pd.DataFrame, metric: str) -> None:
+    reason_col = _reason_column(metric)
+    if metric not in wide.columns or reason_col not in wide.columns:
+        return
+    missing = wide[wide[metric].isna()]
+    if missing.empty:
+        print(f"{metric:26s} no missing values")
+        return
+    counts = missing[reason_col].fillna("UNCLASSIFIED").value_counts()
+    parts = ", ".join(f"{k}={v:,}" for k, v in counts.items())
+    print(f"{metric:26s} {parts}")
+
+
+def _cross_cik_overlaps(long: pd.DataFrame) -> pd.DataFrame:
+    required = {"symbol", "fiscal_period_end", "metric", "cik"}
+    if not required.issubset(long.columns):
+        return pd.DataFrame()
+    x = long.copy()
+    x["cik"] = x["cik"].astype(str).str.zfill(10)
+    keys = ["symbol", "fiscal_period_end", "metric"]
+    multi = x.groupby(keys, dropna=False)["cik"].nunique()
+    multi = multi[multi > 1]
+    if multi.empty:
+        return pd.DataFrame()
+    hit_keys = multi.reset_index()[keys]
+    out = x.merge(hit_keys, on=keys, how="inner")
+    show = [
+        c for c in [
+            "symbol", "fiscal_period_end", "metric", "cik", "accepted_at", "form",
+            "fp", "value", "accession", "period_type",
+        ] if c in out.columns
+    ]
+    return out[show].sort_values(["symbol", "fiscal_period_end", "metric", "accepted_at"])
 
 
 def main() -> None:
@@ -65,13 +105,27 @@ def main() -> None:
 
     print("=== COVERAGE ===")
     for c in metrics:
-        if c in wide.columns:
-            nonnull = wide[c].notna().mean()
-            print(f"{c:26s} {_pct(nonnull)} available | {_pct(1 - nonnull)} missing")
+        if c not in wide.columns:
+            continue
+        available = wide[c].notna().mean()
+        reason_col = _reason_column(c)
+        policy = 0.0
+        if reason_col in wide.columns:
+            policy = wide[reason_col].isin(POLICY_REASONS).mean()
+        unexplained = max(0.0, 1.0 - available - policy)
+        print(
+            f"{c:26s} {_pct(available)} available | "
+            f"{_pct(policy)} policy-excluded | {_pct(unexplained)} other-missing"
+        )
+    print()
+
+    print("=== MISSING REASONS ===")
+    for c in metrics:
+        _print_reason_breakdown(wide, c)
     print()
 
     print("=== TOP SYMBOLS WITH MISSING DATA ===")
-    for c in ["quarterly_eps", "quarterly_revenue", "quarterly_eps_yoy", "quarterly_revenue_yoy", "annual_eps", "annual_eps_growth"]:
+    for c in metrics:
         _print_missing_by_symbol(wide, c, args.top)
     print()
 
@@ -87,6 +141,17 @@ def main() -> None:
         print("period_type not present in long parquet")
     print()
 
+    print("=== CIK BOUNDARY AUDIT ===")
+    overlaps = _cross_cik_overlaps(long)
+    if overlaps.empty:
+        print("Cross-CIK symbol/fiscal_period_end/metric overlaps: 0")
+    else:
+        keys = ["symbol", "fiscal_period_end", "metric"]
+        overlap_groups = overlaps[keys].drop_duplicates()
+        print(f"Cross-CIK symbol/fiscal_period_end/metric overlaps: {len(overlap_groups):,}")
+        print(overlaps.head(max(args.top, 20)).to_string(index=False))
+    print()
+
     print("=== YOY SOURCE ===")
     if "yoy_source" in long.columns:
         yoy_src = long[long["yoy"].notna()]["yoy_source"].value_counts(dropna=False)
@@ -100,7 +165,8 @@ def main() -> None:
     for c in ["quarterly_eps_yoy", "quarterly_revenue_yoy", "annual_eps_growth"]:
         if c not in wide.columns:
             continue
-        o = wide[wide[c].abs() >= args.outlier].copy()
+        values = pd.to_numeric(wide[c], errors="coerce")
+        o = wide[values.abs() >= args.outlier].copy()
         if o.empty:
             print(f"{c}: 0")
             continue
@@ -129,6 +195,9 @@ def main() -> None:
         row_accepted = pd.to_datetime(wide["accepted_at"], errors="coerce", utc=True).dt.tz_convert(None)
         flags.append(("annual_state_from_future", int((annual_accepted > row_accepted).sum())))
     flags.append(("duplicate_full_rows", int(wide.duplicated().sum())))
+
+    overlap_count = 0 if overlaps.empty else len(overlaps[["symbol", "fiscal_period_end", "metric"]].drop_duplicates())
+    flags.append(("cross_cik_period_metric_overlap", overlap_count))
 
     for name, count in flags:
         status = "PASS" if count == 0 else "FAIL"
