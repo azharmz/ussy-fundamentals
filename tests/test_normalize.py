@@ -162,3 +162,62 @@ def test_normalize_keeps_direct_q4_from_10k():
     assert out.iloc[0]["fp"] == "Q4"
     assert out.iloc[0]["period_type"] == "quarterly_direct_q4"
     assert out.iloc[0]["value"] == 1.25
+
+
+def test_normalize_preserves_original_and_amended_observations():
+    original_accn = "0000000000-25-000001"
+    amended_accn = "0000000000-25-000002"
+    companyfacts = {
+        "facts": {
+            "us-gaap": {
+                "EarningsPerShareDiluted": {
+                    "units": {
+                        "USD/shares": [
+                            {
+                                "start": "2025-01-01",
+                                "end": "2025-03-31",
+                                "val": 1.00,
+                                "accn": original_accn,
+                                "form": "10-Q",
+                                "filed": "2025-05-01",
+                                "fy": 2025,
+                                "fp": "Q1",
+                            },
+                            {
+                                "start": "2025-01-01",
+                                "end": "2025-03-31",
+                                "val": 1.10,
+                                "accn": amended_accn,
+                                "form": "10-Q/A",
+                                "filed": "2025-06-01",
+                                "fy": 2025,
+                                "fp": "Q1",
+                            },
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    filings = [
+        {
+            "accessionNumber": original_accn,
+            "filingDate": "2025-05-01",
+            "acceptanceDateTime": "2025-05-01T20:00:00Z",
+            "reportDate": "2025-03-31",
+        },
+        {
+            "accessionNumber": amended_accn,
+            "filingDate": "2025-06-01",
+            "acceptanceDateTime": "2025-06-01T20:00:00Z",
+            "reportDate": "2025-03-31",
+        },
+    ]
+
+    out = normalize_company("TEST", "0000000000", companyfacts, filings)
+    assert len(out) == 2
+    assert set(out["accession"]) == {original_accn, amended_accn}
+    assert set(out["is_amendment"].astype(bool)) == {False, True}
+    values = dict(zip(out["accession"], out["value"]))
+    assert values[original_accn] == 1.00
+    assert values[amended_accn] == 1.10
