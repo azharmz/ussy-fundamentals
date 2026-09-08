@@ -4,8 +4,13 @@ import pandas as pd
 
 FORMS = {"10-Q", "10-Q/A", "10-K", "10-K/A"}
 EPS_TAGS = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
-REVENUE_TAGS = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
-NORMALIZER_VERSION = "sec-ca-v0.4.1"
+REVENUE_TAGS = [
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues",
+    "SalesRevenueNet",
+    "SalesRevenueGoodsNet",
+]
+NORMALIZER_VERSION = "sec-ca-v0.5.0"
 
 
 def _dt(x):
@@ -85,19 +90,105 @@ def _current_period_only(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _same_filing_prior(row: pd.Series, all_period_facts: pd.DataFrame, min_duration: int, max_duration: int):
+    """Find prior-year comparable as presented in the same accession.
+
+    Prefer exact same XBRL concept and unit. This prevents mixing economically different
+    per-share concepts or units when multiple tags coexist in one filing.
+    """
     target_lo = row["fiscal_period_end"] - pd.Timedelta(days=400)
     target_hi = row["fiscal_period_end"] - pd.Timedelta(days=330)
-    c = all_period_facts[
+    base = all_period_facts[
         (all_period_facts["metric"] == row["metric"])
         & (all_period_facts["accession"] == row["accession"])
         & (all_period_facts["end"] >= target_lo)
         & (all_period_facts["end"] <= target_hi)
         & (all_period_facts["duration_days"].between(min_duration, max_duration, inclusive="both"))
     ].copy()
+    if base.empty:
+        return None
+
+    exact = base[(base["tag"] == row.get("tag")) & (base["unit"] == row.get("unit"))].copy()
+    c = exact if not exact.empty else base[base["unit"] == row.get("unit")].copy()
     if c.empty:
         return None
+
     c = c.sort_values(["tag_priority", "is_amendment"], ascending=[True, True])
     return c.iloc[0]["value"]
+
+
+def _build_ytd_quarters(facts: pd.DataFrame, direct_q: pd.DataFrame) -> pd.DataFrame:
+    """Reconstruct Q2/Q3 from cumulative 6M/9M facts when direct quarter facts are absent.
+
+    Q2 = H1 - Q1
+    Q3 = 9M - H1
+
+    Reconstruction is restricted to the same metric/tag/unit and to information available
+    no later than the filing being reconstructed.
+    """
+    if facts.empty:
+        return pd.DataFrame()
+
+    ytd = facts[
+        facts["form"].isin(["10-Q", "10-Q/A"])
+        & facts["period_type"].isin(["half_year", "nine_month"])
+    ].copy()
+    ytd = _current_period_only(ytd)
+    if ytd.empty:
+        return pd.DataFrame()
+
+    out = []
+    direct = direct_q.copy()
+
+    for _, row in ytd.iterrows():
+        if pd.isna(row["accepted_at"]):
+            continue
+
+        same = facts[
+            (facts["metric"] == row["metric"])
+            & (facts["tag"] == row["tag"])
+            & (facts["unit"] == row["unit"])
+            & (facts["accepted_at"] <= row["accepted_at"])
+        ].copy()
+
+        if row["period_type"] == "half_year":
+            q1 = same[
+                (same["period_type"] == "quarterly")
+                & (same["end"] < row["end"])
+                & (same["end"] >= row["start"])
+            ].sort_values(["end", "accepted_at"]).tail(1)
+            if q1.empty:
+                continue
+            value = row["value"] - q1.iloc[-1]["value"]
+            fp = "Q2"
+            derived_from = "H1_MINUS_Q1"
+
+        else:
+            h1 = same[
+                (same["period_type"] == "half_year")
+                & (same["end"] < row["end"])
+                & (same["end"] >= row["start"])
+            ].sort_values(["end", "accepted_at"]).tail(1)
+            if h1.empty:
+                continue
+            value = row["value"] - h1.iloc[-1]["value"]
+            fp = "Q3"
+            derived_from = "9M_MINUS_H1"
+
+        # Do not add a derived observation when a direct quarter already exists for this
+        # metric and report end.
+        exists = direct[(direct["metric"] == row["metric"]) & (direct["end"] == row["end"])]
+        if not exists.empty:
+            continue
+
+        derived = row.copy()
+        derived["value"] = value
+        derived["duration_days"] = 90
+        derived["period_type"] = "quarterly_derived_ytd"
+        derived["fp"] = fp
+        derived["derived_from"] = derived_from
+        out.append(derived)
+
+    return pd.DataFrame(out)
 
 
 def _build_annual_eps_state(all_annual_facts: pd.DataFrame) -> pd.DataFrame:
@@ -124,7 +215,11 @@ def _build_annual_eps_state(all_annual_facts: pd.DataFrame) -> pd.DataFrame:
                 (current["fiscal_period_end"] >= row["fiscal_period_end"] - pd.Timedelta(days=400))
                 & (current["fiscal_period_end"] <= row["fiscal_period_end"] - pd.Timedelta(days=330))
                 & (current["accepted_at"] <= row["accepted_at"])
+                & (current["unit"] == row["unit"])
             ]
+            same_tag = prior[prior["tag"] == row["tag"]]
+            if not same_tag.empty:
+                prior = same_tag
             if not prior.empty:
                 prev = prior.sort_values("accepted_at").iloc[-1]["annual_eps"]
                 source = "PRIOR_PIT_OBSERVATION"
@@ -183,6 +278,11 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
     all_quarter_facts = facts[(facts["period_type"] == "quarterly") & facts["form"].isin(["10-Q", "10-Q/A"])].copy()
     q = _dedupe(_current_period_only(all_quarter_facts))
 
+    ytd_q = _build_ytd_quarters(facts, q)
+    if not ytd_q.empty:
+        q = pd.concat([q, ytd_q], ignore_index=True)
+        q = _dedupe(q)
+
     all_annual_facts = facts[(facts["period_type"] == "annual") & facts["form"].isin(["10-K", "10-K/A"])].copy()
     annual = _dedupe(_current_period_only(all_annual_facts))
     annual_state = _build_annual_eps_state(all_annual_facts)
@@ -191,7 +291,14 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
     for _, fy in annual.iterrows():
         if pd.isna(fy["accepted_at"]):
             continue
-        prior = q[(q["metric"] == fy["metric"]) & (q["accepted_at"] <= fy["accepted_at"]) & (q["end"] < fy["end"]) & (q["end"] >= fy["start"])].copy()
+        prior = q[
+            (q["metric"] == fy["metric"])
+            & (q["tag"] == fy["tag"])
+            & (q["unit"] == fy["unit"])
+            & (q["accepted_at"] <= fy["accepted_at"])
+            & (q["end"] < fy["end"])
+            & (q["end"] >= fy["start"])
+        ].copy()
         if prior.empty:
             continue
         prior = prior.sort_values("accepted_at").groupby("end", as_index=False).tail(1).sort_values("end")
@@ -221,8 +328,8 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
         for i, row in m.iterrows():
             prev = None
             source = None
-            if row.get("period_type") == "quarterly":
-                prev = _same_filing_prior(row, all_quarter_facts, 60, 120)
+            if str(row.get("period_type", "")).startswith("quarterly"):
+                prev = _same_filing_prior(row, facts, 60, 120)
                 if prev is not None:
                     source = "SAME_FILING_COMPARATIVE"
             if prev is None:
@@ -230,7 +337,11 @@ def normalize_company(symbol: str, cik: str, companyfacts: dict, filing_rows: li
                     (m["fiscal_period_end"] >= row["fiscal_period_end"] - pd.Timedelta(days=400))
                     & (m["fiscal_period_end"] <= row["fiscal_period_end"] - pd.Timedelta(days=330))
                     & (m["accepted_at"] <= row["accepted_at"])
+                    & (m["unit"] == row["unit"])
                 ]
+                same_tag = prior[prior["tag"] == row["tag"]]
+                if not same_tag.empty:
+                    prior = same_tag
                 if not prior.empty:
                     prev = prior.sort_values("accepted_at").iloc[-1]["value"]
                     source = "PRIOR_PIT_OBSERVATION"
