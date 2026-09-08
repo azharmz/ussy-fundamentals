@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from ussy_fundamentals.reconcile import build_run_manifest, classify_dropped_symbol
+from ussy_fundamentals.reconcile import (
+    build_run_manifest,
+    classify_dropped_symbol,
+    combine_production_readiness,
+)
 
 
 def test_classify_fpi_separately_from_generic_missing():
@@ -63,3 +67,31 @@ def test_build_manifest_accounts_for_requested_symbols(tmp_path: Path):
     assert manifest.loc["OK", "normalized_rows"] == 2
     assert manifest.loc["FPI", "status"] == "UNSUPPORTED_FPI"
     assert manifest.loc["MISSING", "status"] == "CIK_NOT_FOUND"
+
+
+def test_combine_readiness_keeps_requested_universe_denominator():
+    manifest = pd.DataFrame(
+        {
+            "symbol": ["FULL", "FALLBACK", "FAIL", "FPI"],
+            "cik": ["1", "2", "3", "4"],
+            "status": ["NORMALIZED", "NORMALIZED", "NORMALIZED", "UNSUPPORTED_FPI"],
+            "normalized_rows": [10, 8, 5, 0],
+            "forms_detected": ["", "", "", "20-F,6-K"],
+        }
+    )
+    coverage = pd.DataFrame(
+        {
+            "symbol": ["FULL", "FALLBACK", "FAIL"],
+            "status": ["PASS_FULL", "PASS_3Y_FALLBACK", "FAIL_PRODUCTION_COVERAGE"],
+            "failure_class": [pd.NA, pd.NA, "ANNUAL_LT_3Y"],
+        }
+    )
+
+    out = combine_production_readiness(manifest, coverage).set_index("symbol")
+
+    assert len(out) == 4
+    assert out.loc["FULL", "production_status"] == "PASS_FULL"
+    assert out.loc["FALLBACK", "production_status"] == "PASS_3Y_FALLBACK"
+    assert out.loc["FAIL", "production_status"] == "FAIL_PRODUCTION_COVERAGE"
+    assert out.loc["FPI", "production_status"] == "UNSUPPORTED_FPI"
+    assert out.loc["FPI", "failure_class"] == "UNSUPPORTED_FPI"
