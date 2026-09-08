@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ussy-fundamentals"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.2",
+  "pyarrow>=17",
+  "requests>=2.32",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
