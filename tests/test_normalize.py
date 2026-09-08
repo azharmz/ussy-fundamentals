@@ -2,8 +2,10 @@ import pandas as pd
 
 from ussy_fundamentals.normalize import (
     _build_ytd_quarters,
+    _current_period_only,
     _same_filing_prior,
     classify_period,
+    normalize_company,
 )
 
 
@@ -101,3 +103,62 @@ def test_build_ytd_quarters_reconstructs_q2():
     assert out.iloc[0]["fp"] == "Q2"
     assert out.iloc[0]["derived_from"] == "H1_MINUS_Q1"
     assert out.iloc[0]["value"] == 130.0
+
+
+def test_current_period_rejects_non_amendment_with_implausible_acceptance_lag():
+    df = pd.DataFrame([
+        {
+            "end": pd.Timestamp("2020-04-30"),
+            "report_date": pd.Timestamp("2020-04-30"),
+            "accepted_at": pd.Timestamp("2022-02-24", tz="UTC"),
+            "is_amendment": False,
+        },
+        {
+            "end": pd.Timestamp("2025-04-30"),
+            "report_date": pd.Timestamp("2025-04-30"),
+            "accepted_at": pd.Timestamp("2025-05-28", tz="UTC"),
+            "is_amendment": False,
+        },
+    ])
+    out = _current_period_only(df)
+    assert len(out) == 1
+    assert out.iloc[0]["end"] == pd.Timestamp("2025-04-30")
+
+
+def test_normalize_keeps_direct_q4_from_10k():
+    companyfacts = {
+        "facts": {
+            "us-gaap": {
+                "EarningsPerShareDiluted": {
+                    "units": {
+                        "USD/shares": [
+                            {
+                                "start": "2025-10-01",
+                                "end": "2025-12-31",
+                                "val": 1.25,
+                                "accn": "0000000000-26-000001",
+                                "form": "10-K",
+                                "filed": "2026-02-15",
+                                "fy": 2025,
+                                "fp": "FY",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+    filings = [
+        {
+            "accessionNumber": "0000000000-26-000001",
+            "filingDate": "2026-02-15",
+            "acceptanceDateTime": "2026-02-15T20:00:00Z",
+            "reportDate": "2025-12-31",
+        }
+    ]
+
+    out = normalize_company("TEST", "0000000000", companyfacts, filings)
+    assert len(out) == 1
+    assert out.iloc[0]["fp"] == "Q4"
+    assert out.iloc[0]["period_type"] == "quarterly_direct_q4"
+    assert out.iloc[0]["value"] == 1.25
