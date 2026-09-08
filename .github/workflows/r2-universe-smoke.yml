@@ -1,0 +1,89 @@
+name: R2 universe smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/ussy_fundamentals/universe_source.py"
+      - "pyproject.toml"
+      - ".github/workflows/r2-universe-smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: r2-universe-smoke
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Read canonical R2 universe
+        run: python -m ussy_fundamentals.universe_source
+
+      - name: Verify generated universe contract
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          csv_path = Path("data/processed/current_universe.csv")
+          meta_path = Path("data/processed/current_universe_source.json")
+          assert csv_path.exists(), f"Missing {csv_path}"
+          assert meta_path.exists(), f"Missing {meta_path}"
+
+          universe = pd.read_csv(csv_path, dtype=str)
+          metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+
+          required = {"security_id", "ticker", "sharia_compliance"}
+          missing = required - set(universe.columns)
+          assert not missing, f"Missing columns: {sorted(missing)}"
+          assert not universe.empty, "Canonical universe is empty"
+          assert universe["security_id"].notna().all(), "Missing security_id"
+          assert universe["ticker"].notna().all(), "Missing ticker"
+          assert universe["security_id"].is_unique, "Duplicate security_id"
+          assert (universe["sharia_compliance"] == "COMPLIANT").all(), "Non-COMPLIANT row present"
+
+          expected = int(metadata["confirmed_compliant"])
+          assert len(universe) == expected, (len(universe), expected)
+          assert metadata.get("snapshot_date"), "Missing snapshot_date"
+          assert metadata.get("membership_key"), "Missing membership_key"
+
+          print(f"Verified snapshot {metadata['snapshot_date']}: {len(universe):,} eligible securities")
+          print(f"Membership key: {metadata['membership_key']}")
+          PY
+
+      - name: Upload smoke outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-universe-smoke
+          path: |
+            data/processed/current_universe.csv
+            data/processed/current_universe_source.json
+          if-no-files-found: error
+          retention-days: 7
