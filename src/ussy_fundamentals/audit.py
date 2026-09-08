@@ -72,11 +72,11 @@ def _cross_cik_overlaps(long: pd.DataFrame) -> pd.DataFrame:
 
 
 def _amendment_preservation_issues(long: pd.DataFrame) -> pd.DataFrame:
-    """Return amendment observations that have no preserved earlier original observation.
+    """Return amendment rows without a matching earlier normalized original.
 
-    This is intentionally conservative: an amendment may introduce a fact that was not
-    present in the original filing. Such rows are surfaced for review rather than silently
-    treated as proof of overwrite.
+    Absence of a prior row in the normalized dataset is not proof of overwrite: the
+    original filing may simply not have produced a normalized fact. Therefore this
+    function feeds a REVIEW-only audit section rather than a hard quality failure.
     """
     required = {
         "symbol", "fiscal_period_end", "metric", "accepted_at", "accession", "is_amendment"
@@ -244,14 +244,15 @@ def main() -> None:
         print(overlaps.head(max(args.top, 20)).to_string(index=False))
     print()
 
-    print("=== AMENDMENT PRESERVATION ===")
+    print("=== AMENDMENT PRESERVATION REVIEW ===")
     amendment_count = 0
     if "is_amendment" in long.columns:
         amendment_count = int(long["is_amendment"].fillna(False).astype(bool).sum())
     amendment_issues = _amendment_preservation_issues(long)
     print(f"Amendment observations: {amendment_count:,}")
-    print(f"Amendments without preserved prior original: {len(amendment_issues):,}")
+    print(f"Review-only rows without a prior normalized original: {len(amendment_issues):,}")
     if not amendment_issues.empty:
+        print("NOTE: these rows are indeterminate, not evidence of overwrite.")
         print(amendment_issues.head(max(args.top, 20)).to_string(index=False))
     print()
 
@@ -328,11 +329,13 @@ def main() -> None:
 
     overlap_count = 0 if overlaps.empty else len(overlaps[["symbol", "fiscal_period_end", "metric"]].drop_duplicates())
     flags.append(("cross_cik_period_metric_overlap", overlap_count))
-    flags.append(("amendment_without_prior_original", len(amendment_issues)))
 
     for name, count in flags:
         status = "PASS" if count == 0 else "FAIL"
         print(f"{status:4s} {name:30s} {count:,}")
+
+    if not amendment_issues.empty:
+        print(f"REVIEW amendment_without_prior_normalized_original {len(amendment_issues):,}")
 
 
 if __name__ == "__main__":
