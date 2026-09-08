@@ -4,22 +4,48 @@ from ussy_fundamentals.audit import _cross_cik_overlaps
 from ussy_fundamentals.pipeline import (
     _add_missing_reason_metadata,
     _drop_nonadditive_derived_eps,
+    _prefer_direct_q4,
     _symbol_ciks,
 )
 
 
-def test_drop_nonadditive_derived_eps_keeps_revenue():
+def test_drop_nonadditive_derived_eps_keeps_revenue_and_direct_q4():
     df = pd.DataFrame([
         {"metric": "eps", "period_type": "quarterly_derived_ytd", "value": 1.0},
         {"metric": "eps", "period_type": "quarterly_derived_q4", "value": 2.0},
         {"metric": "revenue", "period_type": "quarterly_derived_ytd", "value": 100.0},
         {"metric": "eps", "period_type": "quarterly", "value": 3.0},
+        {"metric": "eps", "period_type": "quarterly_direct_q4", "value": 4.0},
     ])
     out = _drop_nonadditive_derived_eps(df)
-    assert len(out) == 2
+    assert len(out) == 3
     assert ((out["metric"] == "revenue") & (out["period_type"] == "quarterly_derived_ytd")).any()
     assert ((out["metric"] == "eps") & (out["period_type"] == "quarterly")).any()
+    assert ((out["metric"] == "eps") & (out["period_type"] == "quarterly_direct_q4")).any()
     assert not ((out["metric"] == "eps") & out["period_type"].str.startswith("quarterly_derived")).any()
+
+
+def test_prefer_direct_q4_drops_derived_same_accession():
+    df = pd.DataFrame([
+        {
+            "metric": "revenue",
+            "period_type": "quarterly_derived_q4",
+            "accession": "a1",
+            "fiscal_period_end": "2025-12-31",
+            "value": 99.0,
+        },
+        {
+            "metric": "revenue",
+            "period_type": "quarterly_direct_q4",
+            "accession": "a1",
+            "fiscal_period_end": "2025-12-31",
+            "value": 100.0,
+        },
+    ])
+    out = _prefer_direct_q4(df)
+    assert len(out) == 1
+    assert out.iloc[0]["period_type"] == "quarterly_direct_q4"
+    assert out.iloc[0]["value"] == 100.0
 
 
 def test_symbol_ciks_includes_predecessor_history():
