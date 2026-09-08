@@ -174,6 +174,9 @@ jobs:
       - name: Audit full requested universe
         run: python -m ussy_fundamentals.audit
 
+      - name: Export consolidated reports
+        run: python -m ussy_fundamentals.report
+
       - name: Upload merged full-universe outputs
         uses: actions/upload-artifact@v4
         with:
@@ -182,6 +185,8 @@ jobs:
             data/processed/fundamentals_point_in_time_long.parquet
             data/processed/fundamentals_point_in_time.parquet
             data/processed/fundamentals_run_manifest.parquet
+            data/processed/fundamentals_readiness_report.csv
+            data/processed/fundamentals_readiness_summary.json
             data/processed/current_universe.csv
             data/processed/current_universe_source.json
           if-no-files-found: error
