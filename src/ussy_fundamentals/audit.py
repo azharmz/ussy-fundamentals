@@ -6,10 +6,12 @@ from pathlib import Path
 import pandas as pd
 
 from .production_coverage import print_can_slim_production_coverage
+from .reconcile import print_requested_universe_readiness
 
 
 DEFAULT_WIDE = Path("data/processed/fundamentals_point_in_time.parquet")
 DEFAULT_LONG = Path("data/processed/fundamentals_point_in_time_long.parquet")
+DEFAULT_MANIFEST = Path("data/processed/fundamentals_run_manifest.parquet")
 POLICY_REASONS = {"Q4_EXCLUDED_POLICY"}
 
 
@@ -152,6 +154,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Audit SEC PIT fundamentals coverage and anomalies")
     parser.add_argument("--wide", type=Path, default=DEFAULT_WIDE)
     parser.add_argument("--long", type=Path, default=DEFAULT_LONG)
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--outlier", type=float, default=3.0, help="Absolute growth threshold, 3.0 = 300%%")
     parser.add_argument("--top", type=int, default=20)
     parser.add_argument(
@@ -202,7 +205,10 @@ def main() -> None:
         )
     print()
 
-    print_can_slim_production_coverage(wide)
+    coverage = print_can_slim_production_coverage(wide)
+    if args.manifest.exists():
+        manifest = pd.read_parquet(args.manifest)
+        print_requested_universe_readiness(manifest, coverage)
 
     print("=== MISSING REASONS ===")
     for c in metrics:
