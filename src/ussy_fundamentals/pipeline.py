@@ -40,9 +40,15 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
     wide_df = wide_table(long_df)
 
     # Preserve extreme growth values but flag them for audit/research slicing.
-    wide_df["quarterly_eps_yoy_extreme"] = wide_df["quarterly_eps_yoy"].abs() >= 3.0
-    wide_df["quarterly_revenue_yoy_extreme"] = wide_df["quarterly_revenue_yoy"].abs() >= 3.0
-    wide_df["annual_eps_growth_extreme"] = wide_df["annual_eps_growth"].abs() >= 3.0
+    # Numeric coercion is required because PIT growth columns can contain None/pd.NA.
+    for col, flag_col in [
+        ("quarterly_eps_yoy", "quarterly_eps_yoy_extreme"),
+        ("quarterly_revenue_yoy", "quarterly_revenue_yoy_extreme"),
+        ("annual_eps_growth", "annual_eps_growth_extreme"),
+    ]:
+        values = pd.to_numeric(wide_df[col], errors="coerce")
+        wide_df[col] = values
+        wide_df[flag_col] = values.abs().ge(3.0).fillna(False)
 
     long_path = processed / "fundamentals_point_in_time_long.parquet"
     wide_path = processed / "fundamentals_point_in_time.parquet"
