@@ -71,12 +71,93 @@ def _cross_cik_overlaps(long: pd.DataFrame) -> pd.DataFrame:
     return out[show].sort_values(["symbol", "fiscal_period_end", "metric", "accepted_at"])
 
 
+def _amendment_preservation_issues(long: pd.DataFrame) -> pd.DataFrame:
+    """Return amendment observations that have no preserved earlier original observation.
+
+    This is intentionally conservative: an amendment may introduce a fact that was not
+    present in the original filing. Such rows are surfaced for review rather than silently
+    treated as proof of overwrite.
+    """
+    required = {
+        "symbol", "fiscal_period_end", "metric", "accepted_at", "accession", "is_amendment"
+    }
+    if not required.issubset(long.columns):
+        return pd.DataFrame()
+
+    x = long.copy()
+    x["accepted_at"] = pd.to_datetime(x["accepted_at"], errors="coerce", utc=True)
+    x["is_amendment"] = x["is_amendment"].fillna(False).astype(bool)
+    amendments = x[x["is_amendment"]].copy()
+    if amendments.empty:
+        return pd.DataFrame()
+
+    issues = []
+    for _, row in amendments.iterrows():
+        prior = x[
+            (x["symbol"] == row["symbol"])
+            & (x["metric"] == row["metric"])
+            & (x["fiscal_period_end"] == row["fiscal_period_end"])
+            & (~x["is_amendment"])
+            & (x["accession"] != row["accession"])
+            & (x["accepted_at"] < row["accepted_at"])
+        ]
+        if prior.empty:
+            issues.append(row)
+
+    if not issues:
+        return pd.DataFrame()
+    out = pd.DataFrame(issues)
+    show = [
+        c for c in [
+            "symbol", "fiscal_period_end", "metric", "accepted_at", "form", "accession",
+            "tag", "unit", "value", "period_type",
+        ] if c in out.columns
+    ]
+    return out[show].sort_values(["symbol", "fiscal_period_end", "metric", "accepted_at"])
+
+
+def _symbol_quarter_detail(wide: pd.DataFrame, long: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    s = symbol.upper()
+    w = wide[wide["symbol"].astype(str).str.upper() == s].copy()
+    l = long[long["symbol"].astype(str).str.upper() == s].copy()
+
+    detail_cols = [
+        c for c in [
+            "fiscal_period_end", "accepted_at", "form", "fp", "quarterly_eps",
+            "quarterly_eps_missing_reason", "quarterly_eps_yoy",
+            "quarterly_eps_yoy_missing_reason", "quarterly_revenue",
+            "quarterly_revenue_missing_reason", "quarterly_revenue_yoy",
+            "quarterly_revenue_yoy_missing_reason", "accession", "cik",
+        ] if c in w.columns
+    ]
+    if not w.empty:
+        w = w[detail_cols].sort_values(["fiscal_period_end", "accepted_at"])
+
+    q4_cols = [
+        c for c in [
+            "fiscal_period_end", "accepted_at", "metric", "period_type", "tag", "unit",
+            "value", "yoy", "yoy_source", "accession", "cik",
+        ] if c in l.columns
+    ]
+    if not l.empty and "fp" in l.columns:
+        l = l[l["fp"].astype(str).eq("Q4")]
+    if not l.empty:
+        l = l[q4_cols].sort_values(["fiscal_period_end", "metric", "accepted_at"])
+    return w, l
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Audit SEC PIT fundamentals coverage and anomalies")
     parser.add_argument("--wide", type=Path, default=DEFAULT_WIDE)
     parser.add_argument("--long", type=Path, default=DEFAULT_LONG)
     parser.add_argument("--outlier", type=float, default=3.0, help="Absolute growth threshold, 3.0 = 300%%")
     parser.add_argument("--top", type=int, default=20)
+    parser.add_argument(
+        "--detail-symbol",
+        action="append",
+        default=[],
+        help="Print quarter-level coverage and Q4 provenance for a symbol; may be repeated",
+    )
     args = parser.parse_args()
 
     if not args.wide.exists():
@@ -129,6 +210,17 @@ def main() -> None:
         _print_missing_by_symbol(wide, c, args.top)
     print()
 
+    print("=== Q4 PROVENANCE ===")
+    if "period_type" in long.columns:
+        q4 = long[long["period_type"].isin(["quarterly_direct_q4", "quarterly_derived_q4"])]
+        if q4.empty:
+            print("No Q4 observations")
+        else:
+            print(q4.groupby(["metric", "period_type"]).size().to_string())
+    else:
+        print("period_type not present in long parquet")
+    print()
+
     print("=== DERIVED Q4 ===")
     if "period_type" in long.columns:
         q4 = long[long["period_type"] == "quarterly_derived_q4"]
@@ -152,10 +244,25 @@ def main() -> None:
         print(overlaps.head(max(args.top, 20)).to_string(index=False))
     print()
 
+    print("=== AMENDMENT PRESERVATION ===")
+    amendment_count = 0
+    if "is_amendment" in long.columns:
+        amendment_count = int(long["is_amendment"].fillna(False).astype(bool).sum())
+    amendment_issues = _amendment_preservation_issues(long)
+    print(f"Amendment observations: {amendment_count:,}")
+    print(f"Amendments without preserved prior original: {len(amendment_issues):,}")
+    if not amendment_issues.empty:
+        print(amendment_issues.head(max(args.top, 20)).to_string(index=False))
+    print()
+
     print("=== YOY SOURCE ===")
     if "yoy_source" in long.columns:
-        yoy_src = long[long["yoy"].notna()]["yoy_source"].value_counts(dropna=False)
+        yoy_rows = long[long["yoy"].notna()].copy()
+        yoy_src = yoy_rows["yoy_source"].value_counts(dropna=False)
         print(yoy_src.to_string())
+        if "metric" in yoy_rows.columns and not yoy_rows.empty:
+            print("\nBy metric:")
+            print(yoy_rows.groupby(["metric", "yoy_source"]).size().to_string())
     else:
         print("yoy_source not present")
     print()
@@ -182,7 +289,30 @@ def main() -> None:
         print()
         print(f"Top {min(args.top, len(outliers))} absolute outliers:")
         print(outliers.head(args.top).to_string(index=False))
+
+        if "yoy_source" in long.columns:
+            q_outliers = outliers[outliers["metric"].isin(["quarterly_eps_yoy", "quarterly_revenue_yoy"])].copy()
+            if not q_outliers.empty:
+                source_map = long[["symbol", "fiscal_period_end", "metric", "yoy", "yoy_source"]].copy()
+                source_map["metric"] = source_map["metric"].map({"eps": "quarterly_eps_yoy", "revenue": "quarterly_revenue_yoy"})
+                merged = q_outliers.merge(source_map, on=["symbol", "fiscal_period_end", "metric"], how="left")
+                print("\nQuarterly outliers by comparator source:")
+                print(merged["yoy_source"].fillna("UNKNOWN").value_counts().to_string())
     print()
+
+    for symbol in args.detail_symbol:
+        detail, q4_detail = _symbol_quarter_detail(wide, long, symbol)
+        print(f"=== SYMBOL DETAIL {symbol.upper()} ===")
+        if detail.empty:
+            print("No wide observations")
+        else:
+            print(detail.to_string(index=False))
+        print(f"\n--- {symbol.upper()} Q4 PROVENANCE ---")
+        if q4_detail.empty:
+            print("No Q4 observations")
+        else:
+            print(q4_detail.to_string(index=False))
+        print()
 
     print("=== QUALITY FLAGS ===")
     flags = []
@@ -198,6 +328,7 @@ def main() -> None:
 
     overlap_count = 0 if overlaps.empty else len(overlaps[["symbol", "fiscal_period_end", "metric"]].drop_duplicates())
     flags.append(("cross_cik_period_metric_overlap", overlap_count))
+    flags.append(("amendment_without_prior_original", len(amendment_issues)))
 
     for name, count in flags:
         status = "PASS" if count == 0 else "FAIL"
