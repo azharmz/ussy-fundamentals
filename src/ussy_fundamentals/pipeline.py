@@ -33,9 +33,8 @@ def _symbol_ciks(symbol: str, current_cik: str, history: pd.DataFrame) -> list[s
 def _drop_nonadditive_derived_eps(df: pd.DataFrame) -> pd.DataFrame:
     """Remove quarterly EPS values reconstructed by arithmetic subtraction.
 
-    EPS is not additive across periods because weighted-average diluted shares can change.
-    Revenue may still be reconstructed from cumulative YTD values, but derived EPS rows
-    (Q2/Q3 and Q4) are intentionally excluded until a numerator/share-based method exists.
+    Direct-reported Q4 EPS from a 10-K is valid and is retained. Only arithmetic
+    reconstructions (Q2/Q3 YTD subtraction or FY-minus-prior-quarters) are removed.
     """
     if df.empty or "period_type" not in df.columns:
         return df
@@ -44,13 +43,87 @@ def _drop_nonadditive_derived_eps(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[~bad].copy()
 
 
-def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
-    """Carry only annual state that was actually public by each row's accepted_at.
+def _direct_q4_from_10k(symbol: str, cik: str, facts_json: dict, filing_rows: list[dict]) -> pd.DataFrame:
+    """Extract discrete quarterly facts explicitly reported in a 10-K/10-K/A.
 
-    This function enforces a hard PIT invariant across predecessor/successor CIKs:
-    annual_eps_accepted_at must never be later than the observation accepted_at.
-    Any pre-existing future state is cleared before recomputing the carry-forward.
+    Many issuers expose a 91-day Q4 fact in Companyfacts alongside the full-year fact.
+    These observations are direct-reported, not derived, and are therefore safe to use
+    for PIT backtests once the 10-K is accepted.
     """
+    idx = normalize_mod.accession_index(filing_rows)
+    eps = normalize_mod.fact_rows(facts_json, normalize_mod.EPS_TAGS, "eps", idx)
+    rev = normalize_mod.fact_rows(facts_json, normalize_mod.REVENUE_TAGS, "revenue", idx)
+    facts = pd.concat([eps, rev], ignore_index=True)
+    if facts.empty:
+        return facts
+
+    facts["period_type"] = facts["duration_days"].map(normalize_mod.classify_period)
+    q4 = facts[
+        (facts["period_type"] == "quarterly")
+        & facts["form"].isin(["10-K", "10-K/A"])
+    ].copy()
+    q4 = normalize_mod._current_period_only(q4)
+    q4 = normalize_mod._dedupe(q4)
+    if q4.empty:
+        return q4
+
+    q4["symbol"] = symbol
+    q4["cik"] = cik
+    q4["fiscal_period_end"] = q4["end"]
+    q4["fp"] = "Q4"
+    q4["period_type"] = "quarterly_direct_q4"
+    q4["normalizer_version"] = normalize_mod.NORMALIZER_VERSION
+    q4["derived_from"] = pd.NA
+    q4["yoy"] = pd.NA
+    q4["yoy_source"] = pd.NA
+
+    for i, row in q4.iterrows():
+        prev = normalize_mod._same_filing_prior(row, facts, 60, 120)
+        if prev in (None, 0):
+            continue
+        if row["metric"] == "eps" and prev <= 0:
+            continue
+        q4.at[i, "yoy"] = row["value"] / prev - 1
+        q4.at[i, "yoy_source"] = "SAME_FILING_COMPARATIVE"
+
+    for c in [
+        "annual_eps",
+        "annual_eps_growth",
+        "annual_eps_accepted_at",
+        "annual_eps_filed_at",
+        "annual_eps_source_accession",
+        "annual_growth_source",
+    ]:
+        q4[c] = pd.NA
+
+    return q4
+
+
+def _prefer_direct_q4(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop a derived Q4 when the same accession exposes a direct Q4 fact."""
+    if df.empty or "period_type" not in df.columns:
+        return df
+    direct = df[df["period_type"].astype(str).eq("quarterly_direct_q4")]
+    if direct.empty:
+        return df
+    direct_keys = set(
+        zip(
+            direct["metric"].astype(str),
+            direct["accession"].astype(str),
+            pd.to_datetime(direct["fiscal_period_end"], errors="coerce"),
+        )
+    )
+    derived = df["period_type"].astype(str).eq("quarterly_derived_q4")
+    drop = []
+    for i, row in df.loc[derived].iterrows():
+        key = (str(row["metric"]), str(row["accession"]), pd.to_datetime(row["fiscal_period_end"], errors="coerce"))
+        if key in direct_keys:
+            drop.append(i)
+    return df.drop(index=drop).copy() if drop else df
+
+
+def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
+    """Carry only annual state that was actually public by each row's accepted_at."""
     if df.empty or "annual_eps" not in df.columns:
         return df
 
@@ -80,22 +153,19 @@ def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
 
         state["state_accepted_at"] = pd.to_datetime(state["annual_eps_accepted_at"], errors="coerce", utc=True)
         state = state.dropna(subset=["state_accepted_at"])
-        state = (
-            state.sort_values("state_accepted_at")
-            .groupby("state_accepted_at", as_index=False)
-            .last()
-        )
+        state = state.sort_values("state_accepted_at").groupby("state_accepted_at", as_index=False).last()
 
         left = s.copy()
         left["_row_accepted_at"] = pd.to_datetime(left["accepted_at"], errors="coerce", utc=True)
+        sorted_left = left[["_row_accepted_at"]].sort_values("_row_accepted_at")
         carry = pd.merge_asof(
-            left[["_row_accepted_at"]].sort_values("_row_accepted_at"),
+            sorted_left,
             state.sort_values("state_accepted_at"),
             left_on="_row_accepted_at",
             right_on="state_accepted_at",
             direction="backward",
             allow_exact_matches=True,
-        ).set_index(left.sort_values("_row_accepted_at").index)
+        ).set_index(sorted_left.index)
 
         for c in state_cols:
             left[c] = carry.reindex(left.index)[c]
@@ -113,32 +183,28 @@ def _carry_annual_state_across_ciks(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_missing_reason_metadata(wide_df: pd.DataFrame) -> pd.DataFrame:
-    """Make intentional vs unexplained NA values self-explaining in the final parquet.
-
-    The vocabulary is intentionally conservative. A missing reason describes why the final
-    dataset does not expose a value; it does not fabricate a replacement value.
-    """
+    """Make intentional vs unexplained NA values self-explaining in the final parquet."""
     out = wide_df.copy()
     fp = out["fp"].astype("string") if "fp" in out.columns else pd.Series(pd.NA, index=out.index, dtype="string")
 
-    def reason_col(value_col: str) -> pd.Series:
+    def reason_col() -> pd.Series:
         return pd.Series(pd.NA, index=out.index, dtype="string")
 
     if "quarterly_eps" in out.columns:
-        r = reason_col("quarterly_eps")
+        r = reason_col()
         missing = out["quarterly_eps"].isna()
         r.loc[missing & fp.eq("Q4")] = "Q4_EXCLUDED_POLICY"
         r.loc[missing & r.isna()] = "NO_DIRECT_QUARTER"
         out["quarterly_eps_missing_reason"] = r
 
     if "quarterly_revenue" in out.columns:
-        r = reason_col("quarterly_revenue")
+        r = reason_col()
         missing = out["quarterly_revenue"].isna()
         r.loc[missing] = "NO_DIRECT_QUARTER"
         out["quarterly_revenue_missing_reason"] = r
 
     if "quarterly_eps_yoy" in out.columns:
-        r = reason_col("quarterly_eps_yoy")
+        r = reason_col()
         missing = out["quarterly_eps_yoy"].isna()
         if "quarterly_eps_missing_reason" in out.columns:
             inherited = missing & out["quarterly_eps"].isna()
@@ -147,7 +213,7 @@ def _add_missing_reason_metadata(wide_df: pd.DataFrame) -> pd.DataFrame:
         out["quarterly_eps_yoy_missing_reason"] = r
 
     if "quarterly_revenue_yoy" in out.columns:
-        r = reason_col("quarterly_revenue_yoy")
+        r = reason_col()
         missing = out["quarterly_revenue_yoy"].isna()
         if "quarterly_revenue_missing_reason" in out.columns:
             inherited = missing & out["quarterly_revenue"].isna()
@@ -156,12 +222,12 @@ def _add_missing_reason_metadata(wide_df: pd.DataFrame) -> pd.DataFrame:
         out["quarterly_revenue_yoy_missing_reason"] = r
 
     if "annual_eps" in out.columns:
-        r = reason_col("annual_eps")
+        r = reason_col()
         r.loc[out["annual_eps"].isna()] = "TAG_NOT_FOUND"
         out["annual_eps_missing_reason"] = r
 
     if "annual_eps_growth" in out.columns:
-        r = reason_col("annual_eps_growth")
+        r = reason_col()
         missing = out["annual_eps_growth"].isna()
         if "annual_eps_missing_reason" in out.columns:
             inherited = missing & out["annual_eps"].isna()
@@ -206,6 +272,10 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
             normalized = normalize_company(row.symbol, cik, facts, filings)
             normalized = fill_missing_annual_eps(normalized, facts, filings)
             normalized = _drop_nonadditive_derived_eps(normalized)
+            direct_q4 = _direct_q4_from_10k(row.symbol, cik, facts, filings)
+            if not direct_q4.empty:
+                normalized = pd.concat([normalized, direct_q4], ignore_index=True, sort=False)
+                normalized = _prefer_direct_q4(normalized)
             if not normalized.empty:
                 outputs.append(normalized)
 
