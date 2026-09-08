@@ -6,7 +6,7 @@ import pandas as pd
 
 from . import normalize as normalize_mod
 from .normalize import accession_index, classify_period, fact_rows, normalize_company
-from .pipeline import _load_cik_history, _symbol_ciks
+from .pipeline import _drop_nonadditive_derived_eps, _load_cik_history, _symbol_ciks
 from .sec_client import SecClient, companyfacts, submissions, ticker_mapping
 
 
@@ -57,19 +57,19 @@ def _prepare_tags(metric: str) -> list[str]:
     return tags
 
 
-def _print_missing_periods(normalized: pd.DataFrame, metric: str) -> None:
+def _print_normalized_observations(normalized: pd.DataFrame, metric: str) -> None:
     if normalized.empty:
-        print("\nNo normalized observations.")
+        print("\nNo final pipeline observations.")
         return
 
     q = normalized[normalized["metric"] == metric].copy()
     if q.empty:
-        print(f"\nNo normalized {metric} observations.")
+        print(f"\nNo final pipeline {metric} observations.")
         return
 
     q["fiscal_period_end"] = pd.to_datetime(q["fiscal_period_end"], errors="coerce")
     q = q.sort_values(["fiscal_period_end", "accepted_at"])
-    print("\n=== NORMALIZED OBSERVATIONS ===")
+    print("\n=== FINAL PIPELINE OBSERVATIONS ===")
     cols = [
         "fiscal_period_end", "accepted_at", "form", "fp", "tag", "unit",
         "period_type", "value", "yoy", "yoy_source", "accession",
@@ -111,6 +111,7 @@ def diagnose(symbol: str, metric: str, data_dir: Path) -> None:
             all_candidates.append(candidates)
 
         normalized = normalize_company(symbol, cik, facts_json, filing_rows)
+        normalized = _drop_nonadditive_derived_eps(normalized)
         if not normalized.empty:
             normalized_parts.append(normalized)
 
@@ -143,7 +144,7 @@ def diagnose(symbol: str, metric: str, data_dir: Path) -> None:
 
     if normalized_parts:
         n = pd.concat(normalized_parts, ignore_index=True)
-        _print_missing_periods(n, metric)
+        _print_normalized_observations(n, metric)
 
     print("\n=== DIAGNOSTIC HINTS ===")
     direct = (c["decision"] == "DIRECT_QUARTER_CANDIDATE").sum()
@@ -156,6 +157,7 @@ def diagnose(symbol: str, metric: str, data_dir: Path) -> None:
     print(f"duration rejects          : {duration_reject}")
     if metric == "eps" and ytd:
         print("NOTE: YTD EPS candidates are intentionally not arithmetically subtracted into quarterly EPS.")
+        print("NOTE: derived Q4 EPS is also excluded from final pipeline observations.")
 
 
 def main() -> None:
