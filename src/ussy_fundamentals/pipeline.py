@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import pandas as pd
 
+from .annual_fallback import fill_missing_annual_eps
 from .normalize import normalize_company, wide_table
 from .sec_client import SecClient, companyfacts, submissions, ticker_mapping
 
@@ -28,6 +29,7 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
         filings = submissions(client, row.cik, submissions_dir)
         facts = companyfacts(client, row.cik, companyfacts_dir)
         normalized = normalize_company(row.symbol, row.cik, facts, filings)
+        normalized = fill_missing_annual_eps(normalized, facts, filings)
         if not normalized.empty:
             outputs.append(normalized)
 
@@ -36,6 +38,12 @@ def run(universe_path: Path, data_dir: Path) -> tuple[Path, Path]:
 
     long_df = pd.concat(outputs, ignore_index=True)
     wide_df = wide_table(long_df)
+
+    # Preserve extreme growth values but flag them for audit/research slicing.
+    wide_df["quarterly_eps_yoy_extreme"] = wide_df["quarterly_eps_yoy"].abs() >= 3.0
+    wide_df["quarterly_revenue_yoy_extreme"] = wide_df["quarterly_revenue_yoy"].abs() >= 3.0
+    wide_df["annual_eps_growth_extreme"] = wide_df["annual_eps_growth"].abs() >= 3.0
+
     long_path = processed / "fundamentals_point_in_time_long.parquet"
     wide_path = processed / "fundamentals_point_in_time.parquet"
     long_df.to_parquet(long_path, index=False)
