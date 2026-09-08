@@ -9,8 +9,9 @@ REVENUE_TAGS = [
     "Revenues",
     "SalesRevenueNet",
     "SalesRevenueGoodsNet",
+    "SalesAndOtherOperatingRevenue",
 ]
-NORMALIZER_VERSION = "sec-ca-v0.6.0"
+NORMALIZER_VERSION = "sec-ca-v0.6.1"
 
 
 def _dt(x):
@@ -27,36 +28,39 @@ def accession_index(filings: list[dict]) -> dict[str, dict]:
 
 
 def fact_rows(companyfacts: dict, tags: list[str], metric: str, filings: dict[str, dict]) -> pd.DataFrame:
-    gaap = companyfacts.get("facts", {}).get("us-gaap", {})
+    facts = companyfacts.get("facts", {})
+    namespaces = ["us-gaap"] + sorted(ns for ns in facts if ns != "us-gaap")
     rows = []
     for priority, tag in enumerate(tags):
-        concept = gaap.get(tag)
-        if not concept:
-            continue
-        for unit, entries in concept.get("units", {}).items():
-            for f in entries:
-                if f.get("form") not in FORMS:
-                    continue
-                meta = filings.get(f.get("accn"), {})
-                rows.append({
-                    "metric": metric,
-                    "tag": tag,
-                    "tag_priority": priority,
-                    "unit": unit,
-                    "value": f.get("val"),
-                    "start": _dt(f.get("start")),
-                    "end": _dt(f.get("end")),
-                    "duration_days": _duration_days(f.get("start"), f.get("end")),
-                    "filed_at": _dt(meta.get("filingDate") or f.get("filed")),
-                    "accepted_at": _dt(meta.get("acceptanceDateTime") or meta.get("acceptanceDatetime")),
-                    "report_date": _dt(meta.get("reportDate")),
-                    "accession": f.get("accn"),
-                    "form": f.get("form"),
-                    "fy": f.get("fy"),
-                    "fp": f.get("fp"),
-                    "frame": f.get("frame"),
-                    "is_amendment": str(f.get("form", "")).endswith("/A"),
-                })
+        for namespace_rank, namespace in enumerate(namespaces):
+            concept = facts.get(namespace, {}).get(tag)
+            if not concept:
+                continue
+            for unit, entries in concept.get("units", {}).items():
+                for f in entries:
+                    if f.get("form") not in FORMS:
+                        continue
+                    meta = filings.get(f.get("accn"), {})
+                    rows.append({
+                        "metric": metric,
+                        "tag": tag,
+                        "taxonomy": namespace,
+                        "tag_priority": priority * 1000 + namespace_rank,
+                        "unit": unit,
+                        "value": f.get("val"),
+                        "start": _dt(f.get("start")),
+                        "end": _dt(f.get("end")),
+                        "duration_days": _duration_days(f.get("start"), f.get("end")),
+                        "filed_at": _dt(meta.get("filingDate") or f.get("filed")),
+                        "accepted_at": _dt(meta.get("acceptanceDateTime") or meta.get("acceptanceDatetime")),
+                        "report_date": _dt(meta.get("reportDate")),
+                        "accession": f.get("accn"),
+                        "form": f.get("form"),
+                        "fy": f.get("fy"),
+                        "fp": f.get("fp"),
+                        "frame": f.get("frame"),
+                        "is_amendment": str(f.get("form", "")).endswith("/A"),
+                    })
     return pd.DataFrame(rows)
 
 
