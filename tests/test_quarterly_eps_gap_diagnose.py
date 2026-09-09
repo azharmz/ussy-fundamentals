@@ -36,6 +36,17 @@ def test_classifies_nonstandard_eps_tags_only():
     assert "IncomeLossFromContinuingOperationsPerDilutedShare" in stats["nonconfigured_eps_like_tags"]
 
 
+def test_eps_related_share_count_is_not_treated_as_nonstandard_eps():
+    payload = _fact("AntidilutiveSecuritiesExcludedFromComputationOfEarningsPerShareAmount", [
+        {"form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 1000000, "accn": "A1"},
+        {"form": "10-Q", "start": "2025-04-01", "end": "2025-06-30", "val": 1200000, "accn": "A2"},
+    ], unit="shares")
+    filings = [_filing("A1", "2025-03-31"), _filing("A2", "2025-06-30")]
+    cls, stats = classify_symbol("TEST", "0000000001", payload, filings)
+    assert cls == "NO_USABLE_EPS_EVIDENCE"
+    assert stats["nonconfigured_eps_like_tags"] == ""
+
+
 def test_classifies_short_quarterly_history_as_expected():
     payload = _fact("EarningsPerShareDiluted", [
         {"form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 0.5, "accn": "A1"},
@@ -48,8 +59,6 @@ def test_classifies_short_quarterly_history_as_expected():
 
 
 def test_classifies_longer_history_without_positive_comparators():
-    # Five genuine discrete quarters spanning >330 days, intentionally without a
-    # prior period inside the normal 330-400 day YoY matching band.
     starts = ["2024-01-01", "2024-04-10", "2024-07-20", "2024-10-30", "2025-02-08"]
     ends = ["2024-03-31", "2024-07-09", "2024-10-18", "2025-01-28", "2025-05-09"]
     entries = []
