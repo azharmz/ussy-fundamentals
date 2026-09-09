@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .annual_fallback import DILUTED_SHARES_TAGS, NET_INCOME_TAGS
 from .normalize import EPS_TAGS, _current_period_only, accession_index, classify_period, fact_rows, normalize_company
 from .pipeline import _drop_nonadditive_derived_eps
 from .sec_client import SecClient, companyfacts, submissions
@@ -41,6 +42,35 @@ def _recent_window(df: pd.DataFrame, periods: int = 8) -> pd.DataFrame:
     return out[out["end"].isin(keep)].copy()
 
 
+def _direct_quarter_candidates(payload: dict, idx: dict[str, dict], tags: list[str], metric: str) -> pd.DataFrame:
+    df = fact_rows(payload, tags, metric, idx)
+    if df.empty:
+        return df
+    df["period_type"] = df["duration_days"].map(classify_period)
+    df = df[
+        df["form"].isin(["10-Q", "10-Q/A"])
+        & df["period_type"].eq("quarterly")
+    ].copy()
+    return _current_period_only(df)
+
+
+def _fallback_pair_periods(payload: dict, idx: dict[str, dict]) -> tuple[int, str | None]:
+    ni = _direct_quarter_candidates(payload, idx, NET_INCOME_TAGS, "net_income")
+    sh = _direct_quarter_candidates(payload, idx, DILUTED_SHARES_TAGS, "diluted_shares")
+    if ni.empty or sh.empty:
+        return 0, None
+
+    pairs = ni[["accession", "end"]].drop_duplicates().merge(
+        sh[["accession", "end"]].drop_duplicates(), on=["accession", "end"], how="inner"
+    )
+    if pairs.empty:
+        return 0, None
+    pairs = pairs.sort_values("end")
+    recent = _recent_window(pairs, 8)
+    latest = pd.to_datetime(recent["end"], errors="coerce").max()
+    return int(recent["end"].nunique()), str(latest.date()) if pd.notna(latest) else None
+
+
 def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict]) -> tuple[str, dict]:
     idx = accession_index(filing_rows)
     facts = fact_rows(payload, EPS_TAGS, "eps", idx)
@@ -67,6 +97,7 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
     direct_recent = _recent_window(current_direct, 8)
     ytd_recent = _recent_window(current_ytd, 8)
     eps_like = _eps_like_tags(payload)
+    fallback_periods, fallback_latest = _fallback_pair_periods(payload, idx)
 
     norm_periods = int(recent_norm["fiscal_period_end"].nunique()) if not recent_norm.empty else 0
     yoy_usable = int(pd.to_numeric(recent_norm.get("yoy"), errors="coerce").notna().sum()) if not recent_norm.empty else 0
@@ -82,6 +113,8 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
         cls = "DIRECT_EPS_PRESENT_YOY_COMPARATOR_GAP"
     elif direct_periods >= 2 and norm_periods < 2:
         cls = "DIRECT_EPS_PRESENT_NORMALIZATION_GAP"
+    elif direct_periods < 2 and fallback_periods >= 2:
+        cls = "DIRECT_NET_INCOME_SHARES_FALLBACK_AVAILABLE"
     elif direct_periods < 2 and ytd_periods >= 2:
         cls = "YTD_ONLY_OR_MOSTLY_YTD"
     elif not configured_present and nonconfigured_eps_like:
@@ -101,6 +134,8 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
         "ytd_current_periods": ytd_periods,
         "normalized_recent_eps_periods": norm_periods,
         "normalized_recent_eps_yoy_usable": yoy_usable,
+        "fallback_direct_net_income_shares_periods": fallback_periods,
+        "fallback_latest_end": fallback_latest,
         "latest_direct_end": str(pd.to_datetime(current_direct["end"], errors="coerce").max().date()) if not current_direct.empty else None,
         "latest_normalized_end": str(pd.to_datetime(eps_norm["fiscal_period_end"], errors="coerce").max().date()) if not eps_norm.empty else None,
     }
@@ -133,6 +168,7 @@ def diagnose(readiness_path: Path, output: Path, summary_output: Path) -> tuple[
     summary = {
         "target_symbols": int(len(out)),
         "diagnosis_class_counts": {str(k): int(v) for k, v in counts.items()},
+        "fallback_candidates": int((out.get("fallback_direct_net_income_shares_periods", pd.Series(dtype=int)) >= 2).sum()) if not out.empty else 0,
     }
     summary_output.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -140,6 +176,7 @@ def diagnose(readiness_path: Path, output: Path, summary_output: Path) -> tuple[
     print(f"Target symbols: {len(out)}")
     for key, value in counts.items():
         print(f"  {key}: {value}")
+    print(f"Fallback input candidates: {summary['fallback_candidates']}")
     print(f"Wrote {output}")
     print(f"Wrote {summary_output}")
     return out, summary
