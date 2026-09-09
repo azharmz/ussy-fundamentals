@@ -89,5 +89,13 @@ def submissions(client: SecClient, cik: str, cache_dir: Path) -> list[dict]:
 def companyfacts(client: SecClient, cik: str, cache_dir: Path) -> dict:
     path = cache_dir / f"CIK{cik}.json"
     if not path.exists():
-        save_json_immutable(path, client.get_json(f"{SEC_DATA}/api/xbrl/companyfacts/CIK{cik}.json"))
+        try:
+            payload = client.get_json(f"{SEC_DATA}/api/xbrl/companyfacts/CIK{cik}.json")
+        except requests.HTTPError as exc:
+            response = exc.response
+            if response is not None and response.status_code == 404:
+                print(f"WARN CIK={cik} SEC companyfacts not found (404); continuing without facts")
+                return {}
+            raise
+        save_json_immutable(path, payload)
     return load_json(path)
