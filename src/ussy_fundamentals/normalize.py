@@ -6,12 +6,13 @@ FORMS = {"10-Q", "10-Q/A", "10-K", "10-K/A"}
 EPS_TAGS = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted", "EarningsPerShareBasic"]
 REVENUE_TAGS = [
     "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "RevenueFromContractWithCustomerIncludingAssessedTax",
     "Revenues",
     "SalesRevenueNet",
     "SalesRevenueGoodsNet",
     "SalesAndOtherOperatingRevenue",
 ]
-NORMALIZER_VERSION = "sec-ca-v0.6.1"
+NORMALIZER_VERSION = "sec-ca-v0.6.2"
 
 
 def _dt(x):
