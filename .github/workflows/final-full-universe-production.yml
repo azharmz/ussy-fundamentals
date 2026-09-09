@@ -2,10 +2,6 @@ name: Final full-universe production readiness
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/final-full-universe-production.yml'
 
 permissions:
   contents: read
@@ -28,8 +24,8 @@ jobs:
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
       PYTHONUNBUFFERED: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
@@ -49,7 +45,7 @@ jobs:
           print('matrix=' + json.dumps(list(range(24))))
           PY
       - name: Upload frozen universe contract
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: final-current-universe-contract
           path: |
@@ -71,15 +67,15 @@ jobs:
       SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
       PYTHONUNBUFFERED: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
       - name: Install package
         run: python -m pip install --disable-pip-version-check -e .
       - name: Download frozen universe contract
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: final-current-universe-contract
           path: seed
@@ -95,7 +91,7 @@ jobs:
       - name: Audit shard
         run: python -m ussy_fundamentals.audit
       - name: Upload shard output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: final-fundamentals-shard-${{ matrix.shard }}
           path: |
@@ -112,20 +108,20 @@ jobs:
     timeout-minutes: 40
     if: ${{ always() && needs.shard.result == 'success' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
       - name: Install package
         run: python -m pip install --disable-pip-version-check -e .
       - name: Download frozen universe contract
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: final-current-universe-contract
           path: seed
       - name: Download all shard outputs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: final-fundamentals-shard-*
           path: data/shards
@@ -146,7 +142,7 @@ jobs:
           echo '--- FINAL PRODUCTION SUMMARY ---'
           cat data/processed/fundamentals_final_production_summary.json
       - name: Upload final production package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fundamentals-final-production
           path: |
