@@ -1,0 +1,54 @@
+name: Validate quarterly EPS fallback
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ussy_fundamentals/quarterly_eps_fallback_validate.py'
+      - 'tests/test_quarterly_eps_fallback_validate.py'
+      - '.github/workflows/quarterly-eps-fallback-validation.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+      - name: Run regression tests
+        run: pytest -q
+      - name: Download latest quarterly EPS diagnosis
+        uses: actions/download-artifact@v4
+        with:
+          name: quarterly-eps-gap-diagnosis
+          path: seed
+          repository: azharmz/ussy-fundamentals
+          run-id: 34310721081
+          github-token: ${{ github.token }}
+      - name: Validate direct-quarter fallback
+        run: |
+          mkdir -p data/processed
+          cp seed/quarterly_eps_gap_diagnosis.csv data/processed/quarterly_eps_gap_diagnosis.csv
+          python -m ussy_fundamentals.quarterly_eps_fallback_validate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quarterly-eps-fallback-validation
+          path: |
+            data/processed/quarterly_eps_fallback_validation.csv
+            data/processed/quarterly_eps_fallback_validation_summary.json
+          if-no-files-found: error
+          retention-days: 14
