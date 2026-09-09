@@ -48,10 +48,12 @@ def test_classifies_short_quarterly_history_as_expected():
 
 
 def test_classifies_longer_direct_history_with_comparator_gap():
-    ends = ["2024-03-31", "2024-06-30", "2024-09-30", "2025-03-31", "2025-06-30"]
+    # Five genuine discrete quarters spanning >330 days, intentionally without a
+    # prior period inside the normal 330-400 day YoY matching band.
+    starts = ["2024-01-01", "2024-04-10", "2024-07-20", "2024-10-30", "2025-02-08"]
+    ends = ["2024-03-31", "2024-07-09", "2024-10-18", "2025-01-28", "2025-05-09"]
     entries = []
     filings = []
-    starts = ["2024-01-01", "2024-04-01", "2024-07-01", "2025-01-01", "2025-04-01"]
     for i, (start, end) in enumerate(zip(starts, ends), 1):
         accn = f"A{i}"
         entries.append({"form":"10-Q","start":start,"end":end,"val":0.5+i/10,"accn":accn})
@@ -60,6 +62,7 @@ def test_classifies_longer_direct_history_with_comparator_gap():
     cls, stats = classify_symbol("TEST", "0000000001", payload, filings)
     assert cls == "DIRECT_EPS_PRESENT_YOY_COMPARATOR_GAP"
     assert stats["direct_current_quarter_periods"] == 5
+    assert stats["direct_history_span_days"] > 330
 
 
 def test_classifies_stale_standard_eps_evidence():
