@@ -1,0 +1,76 @@
+name: Validate assessed-tax-inclusive revenue tag
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ussy_fundamentals/normalize.py'
+      - 'tests/test_revenue_including_assessed_tax.py'
+      - '.github/workflows/targeted-revenue-tag-validation.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+
+      - name: Run regression tests
+        run: pytest -q
+
+      - name: Download revenue failure diagnosis
+        uses: actions/download-artifact@v4
+        with:
+          name: quarterly-revenue-gap-diagnosis
+          path: seed
+          repository: azharmz/ussy-fundamentals
+          run-id: 34318361573
+          github-token: ${{ github.token }}
+
+      - name: Build targeted revenue-failure universe
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          src = pd.read_csv('seed/quarterly_revenue_gap_diagnosis.csv')
+          symbols = src[['symbol']].dropna().drop_duplicates().sort_values('symbol')
+          symbols.to_csv('data/universe.revenue_failures.csv', index=False)
+          print(f'Target symbols: {len(symbols)}')
+          print(','.join(symbols['symbol'].astype(str)))
+          PY
+
+      - name: Run targeted fundamentals pipeline
+        run: python -m ussy_fundamentals.pipeline --universe data/universe.revenue_failures.csv
+
+      - name: Audit targeted production coverage
+        run: |
+          python -m ussy_fundamentals.audit | tee data/processed/targeted_revenue_validation_audit.txt
+
+      - name: Upload targeted validation output
+        uses: actions/upload-artifact@v4
+        with:
+          name: targeted-revenue-tag-validation
+          path: |
+            data/universe.revenue_failures.csv
+            data/processed/fundamentals_point_in_time_long.parquet
+            data/processed/fundamentals_point_in_time.parquet
+            data/processed/fundamentals_run_manifest.parquet
+            data/processed/targeted_revenue_validation_audit.txt
+          if-no-files-found: error
+          retention-days: 14
