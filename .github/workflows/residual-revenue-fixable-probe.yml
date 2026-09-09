@@ -1,0 +1,66 @@
+name: Probe fixable residual revenue failures
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ussy_fundamentals/residual_revenue_fixable_probe.py'
+      - 'tests/test_residual_revenue_fixable_probe.py'
+      - '.github/workflows/residual-revenue-fixable-probe.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+
+      - name: Run regression tests
+        run: pytest -q
+
+      - name: Download residual revenue diagnosis
+        uses: actions/download-artifact@v4
+        with:
+          name: residual-quarterly-revenue-diagnosis
+          path: seed
+          repository: azharmz/ussy-fundamentals
+          run-id: 34323698203
+          github-token: ${{ github.token }}
+
+      - name: Probe remaining fixable classes
+        run: |
+          mkdir -p data/processed
+          cp seed/residual_quarterly_revenue_gap_diagnosis.csv data/processed/residual_quarterly_revenue_gap_diagnosis.csv
+          cp seed/fundamentals_readiness_report.csv data/processed/fundamentals_readiness_report.csv
+          python -m ussy_fundamentals.residual_revenue_fixable_probe
+          echo '--- summary ---'
+          cat data/processed/residual_revenue_fixable_probe_summary.json
+
+      - name: Upload probe report
+        uses: actions/upload-artifact@v4
+        with:
+          name: residual-revenue-fixable-probe
+          path: |
+            data/processed/residual_revenue_fixable_probe.csv
+            data/processed/residual_revenue_fixable_probe_summary.json
+          if-no-files-found: error
+          retention-days: 14
