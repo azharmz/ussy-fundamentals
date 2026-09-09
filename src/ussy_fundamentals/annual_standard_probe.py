@@ -32,6 +32,23 @@ def _annual_eps_rows(payload: dict, filings: list[dict]) -> pd.DataFrame:
     ].copy()
 
 
+def _eps_like_tags(payload: dict) -> list[str]:
+    tags: set[str] = set()
+    for namespace in payload.get("facts", {}).values():
+        if not isinstance(namespace, dict):
+            continue
+        for tag in namespace:
+            lower = str(tag).lower()
+            if (
+                "earningspershare" in lower
+                or "perdilutedshare" in lower
+                or "perbasicshare" in lower
+                or "percommonshare" in lower
+            ):
+                tags.add(str(tag))
+    return sorted(tags)
+
+
 def probe_symbol(symbol: str, cik: str, client: SecClient) -> tuple[pd.DataFrame, dict]:
     filings = submissions(client, cik, Path("data/probe/submissions"))
     payload = client.get_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json")
@@ -76,6 +93,7 @@ def probe_symbol(symbol: str, cik: str, client: SecClient) -> tuple[pd.DataFrame
         "fallback_state_rows": int(len(fallback)),
         "facts_missing_accepted_at": int(annual["accepted_at"].isna().sum()) if not annual.empty else 0,
         "facts_report_date_mismatch": int((pd.to_datetime(annual["end"], errors="coerce") != pd.to_datetime(annual["report_date"], errors="coerce")).sum()) if not annual.empty else 0,
+        "eps_like_tags": _eps_like_tags(payload),
     }
     return detail, summary
 
