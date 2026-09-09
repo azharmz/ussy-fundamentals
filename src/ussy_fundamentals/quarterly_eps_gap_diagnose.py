@@ -34,12 +34,13 @@ def _recent_window(df: pd.DataFrame, periods: int = 8) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
-    out["end"] = pd.to_datetime(out["end"], errors="coerce")
-    ends = sorted(out["end"].dropna().unique())
+    date_col = "end" if "end" in out.columns else "fiscal_period_end"
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    ends = sorted(out[date_col].dropna().unique())
     if len(ends) <= periods:
         return out
     keep = set(ends[-periods:])
-    return out[out["end"].isin(keep)].copy()
+    return out[out[date_col].isin(keep)].copy()
 
 
 def _direct_quarter_candidates(payload: dict, idx: dict[str, dict], tags: list[str], metric: str) -> pd.DataFrame:
@@ -80,6 +81,52 @@ def _latest_supported_report(filing_rows: list[dict]) -> pd.Timestamp:
     return max(values) if values else pd.NaT
 
 
+def _comparator_base_counts(current_direct: pd.DataFrame, eps_norm: pd.DataFrame) -> tuple[int, int]:
+    """Count recent PIT-safe prior-year bases that are positive vs non-positive.
+
+    This mirrors the normalizer's prior-observation window, but deliberately measures
+    whether a mathematically valid positive EPS base exists. If it does not, missing YoY
+    is a data/property constraint rather than a comparator implementation bug.
+    """
+    if current_direct.empty or eps_norm.empty:
+        return 0, 0
+
+    direct = current_direct.copy()
+    direct["end"] = pd.to_datetime(direct["end"], errors="coerce")
+    direct["accepted_at"] = pd.to_datetime(direct["accepted_at"], errors="coerce", utc=True)
+    norm = _recent_window(eps_norm, 8).copy()
+    norm["fiscal_period_end"] = pd.to_datetime(norm["fiscal_period_end"], errors="coerce")
+    norm["accepted_at"] = pd.to_datetime(norm["accepted_at"], errors="coerce", utc=True)
+
+    positive = 0
+    nonpositive = 0
+    for _, row in norm.iterrows():
+        end = row["fiscal_period_end"]
+        accepted = row["accepted_at"]
+        if pd.isna(end) or pd.isna(accepted):
+            continue
+        lo = end - pd.Timedelta(days=400)
+        hi = end - pd.Timedelta(days=330)
+        candidates = direct[
+            direct["end"].between(lo, hi, inclusive="both")
+            & direct["unit"].eq(row.get("unit"))
+            & direct["accepted_at"].le(accepted)
+        ].copy()
+        if candidates.empty:
+            continue
+        same_tag = candidates[candidates["tag"].eq(row.get("tag"))]
+        if not same_tag.empty:
+            candidates = same_tag
+        prior = pd.to_numeric(candidates.sort_values("accepted_at").iloc[-1]["value"], errors="coerce")
+        if pd.isna(prior):
+            continue
+        if prior > 0:
+            positive += 1
+        else:
+            nonpositive += 1
+    return positive, nonpositive
+
+
 def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict]) -> tuple[str, dict]:
     idx = accession_index(filing_rows)
     facts = fact_rows(payload, EPS_TAGS, "eps", idx)
@@ -107,6 +154,7 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
     ytd_recent = _recent_window(current_ytd, 8)
     eps_like = _eps_like_tags(payload)
     fallback_periods, fallback_latest = _fallback_pair_periods(payload, idx)
+    positive_bases, nonpositive_bases = _comparator_base_counts(current_direct, eps_norm)
 
     norm_periods = int(recent_norm["fiscal_period_end"].nunique()) if not recent_norm.empty else 0
     yoy_usable = int(pd.to_numeric(recent_norm.get("yoy"), errors="coerce").notna().sum()) if not recent_norm.empty else 0
@@ -126,6 +174,8 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
         cls = "STANDARD_EPS_EVIDENCE_STALE"
     elif direct_periods >= 1 and direct_periods <= 4 and direct_span_days is not None and direct_span_days < 330:
         cls = "SHORT_QUARTERLY_HISTORY_EXPECTED"
+    elif direct_periods >= 2 and norm_periods >= 2 and yoy_usable < 2 and positive_bases < 2:
+        cls = "POSITIVE_BASE_COMPARATORS_INSUFFICIENT"
     elif direct_periods >= 2 and norm_periods >= 2 and yoy_usable < 2:
         cls = "DIRECT_EPS_PRESENT_YOY_COMPARATOR_GAP"
     elif direct_periods >= 2 and norm_periods < 2:
@@ -154,6 +204,8 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
         "ytd_current_periods": ytd_periods,
         "normalized_recent_eps_periods": norm_periods,
         "normalized_recent_eps_yoy_usable": yoy_usable,
+        "positive_base_comparator_periods": positive_bases,
+        "nonpositive_base_comparator_periods": nonpositive_bases,
         "fallback_direct_net_income_shares_periods": fallback_periods,
         "fallback_latest_end": fallback_latest,
         "latest_direct_end": str(latest_direct.date()) if pd.notna(latest_direct) else None,
