@@ -1,4 +1,4 @@
-name: Validate quarterly EPS fallback
+name: Validate stale quarterly EPS fallback
 
 on:
   workflow_dispatch:
@@ -31,22 +31,23 @@ jobs:
           python -m pip install pytest
       - name: Run regression tests
         run: pytest -q
-      - name: Download latest quarterly EPS diagnosis
+      - name: Download stale quarterly EPS diagnosis
         uses: actions/download-artifact@v4
         with:
-          name: quarterly-eps-gap-diagnosis
+          name: quarterly-eps-stale-diagnosis
           path: seed
           repository: azharmz/ussy-fundamentals
-          run-id: 34310721081
+          run-id: 34316977280
           github-token: ${{ github.token }}
-      - name: Validate direct-quarter fallback
+      - name: Validate historical overlap for stale fallback candidates
         run: |
           mkdir -p data/processed
-          cp seed/quarterly_eps_gap_diagnosis.csv data/processed/quarterly_eps_gap_diagnosis.csv
+          cp seed/quarterly_eps_stale_diagnosis.csv data/processed/quarterly_eps_stale_diagnosis.csv
           python -m ussy_fundamentals.quarterly_eps_fallback_validate
+          cat data/processed/quarterly_eps_fallback_validation_summary.json
       - uses: actions/upload-artifact@v4
         with:
-          name: quarterly-eps-fallback-validation
+          name: quarterly-eps-stale-fallback-validation
           path: |
             data/processed/quarterly_eps_fallback_validation.csv
             data/processed/quarterly_eps_fallback_validation_summary.json
