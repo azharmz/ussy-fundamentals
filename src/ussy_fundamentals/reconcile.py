@@ -129,10 +129,10 @@ def build_run_manifest(
 def combine_production_readiness(manifest: pd.DataFrame, coverage: pd.DataFrame) -> pd.DataFrame:
     """Account for every requested symbol in one strategy-readiness table.
 
-    Normalized symbols inherit their CAN SLIM production-window status. Symbols that
-    never reached normalized output retain the explicit acquisition/filing taxonomy
-    from the run manifest. This makes the full requested universe auditable with no
-    silent denominator shrinkage.
+    Normalized symbols inherit their CAN SLIM production-window status and all
+    diagnostic coverage columns. Symbols that never reached normalized output retain
+    the explicit acquisition/filing taxonomy from the run manifest. This makes the
+    full requested universe auditable with no silent denominator shrinkage.
     """
     if manifest.empty:
         return manifest.copy()
@@ -149,10 +149,19 @@ def combine_production_readiness(manifest: pd.DataFrame, coverage: pd.DataFrame)
 
     c = coverage.copy()
     c["symbol"] = c["symbol"].astype(str).str.upper().str.strip()
-    keep = ["symbol", "status"] + (["failure_class"] if "failure_class" in c.columns else [])
-    c = c[keep].drop_duplicates("symbol", keep="last").rename(columns={"status": "coverage_status"})
+    c = c.drop_duplicates("symbol", keep="last").rename(columns={"status": "coverage_status"})
     if "failure_class" not in c.columns:
         c["failure_class"] = pd.NA
+
+    # Preserve every strategy-audit diagnostic (annual_years, usable YoY counts,
+    # staleness, etc.) instead of collapsing coverage to status/failure_class only.
+    # Avoid accidental collisions with manifest-owned columns.
+    manifest_owned = set(out.columns) - {"symbol"}
+    diagnostic_cols = [
+        col for col in c.columns
+        if col == "symbol" or col == "coverage_status" or col == "failure_class" or col not in manifest_owned
+    ]
+    c = c[diagnostic_cols]
 
     out = out.merge(c, on="symbol", how="left")
     out["production_status"] = out["run_status"]
