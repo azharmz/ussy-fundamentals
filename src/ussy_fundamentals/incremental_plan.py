@@ -20,6 +20,18 @@ def _latest_baseline_acceptance(long_df: pd.DataFrame) -> dict[str, pd.Timestamp
     return df.dropna(subset=["accepted_at"]).groupby("symbol")["accepted_at"].max().to_dict()
 
 
+def _normalize_cik(value: Any) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return digits.zfill(10) if digits else None
+
+
 def _latest_supported_filing(client: SecClient, cik: str) -> pd.Timestamp | None:
     payload = client.get_json(f"{SEC_DATA}/submissions/CIK{cik}.json")
     recent = payload.get("filings", {}).get("recent", {})
@@ -49,6 +61,7 @@ def build_incremental_plan(
     baseline_long: pd.DataFrame,
     client: SecClient,
     mapping_cache: Path,
+    baseline_cutoff: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     cur = current_universe.copy()
     old = baseline_universe.copy()
@@ -63,14 +76,18 @@ def build_incremental_plan(
     baseline_manifest = baseline_manifest.copy()
     baseline_manifest["symbol"] = baseline_manifest["symbol"].astype(str).str.upper().str.strip()
     cik_by_symbol = {
-        row.symbol: str(row.cik).zfill(10)
+        row.symbol: cik
         for row in baseline_manifest.itertuples()
-        if pd.notna(row.cik) and str(row.cik).strip()
+        if (cik := _normalize_cik(row.cik))
     }
 
     mapping = ticker_mapping(client, mapping_cache)
     mapping_dict = dict(zip(mapping["symbol"], mapping["cik"]))
     latest_baseline = _latest_baseline_acceptance(baseline_long)
+    if baseline_cutoff is not None:
+        baseline_cutoff = pd.to_datetime(baseline_cutoff, utc=True, errors="coerce")
+        if pd.isna(baseline_cutoff):
+            baseline_cutoff = None
 
     impacted: list[dict[str, Any]] = []
     new_filing_symbols: list[str] = []
@@ -83,7 +100,7 @@ def build_incremental_plan(
             reason = "UNIVERSE_ADDED"
         if cik:
             latest_sec = _latest_supported_filing(client, cik)
-            baseline_ts = latest_baseline.get(symbol)
+            baseline_ts = latest_baseline.get(symbol) or baseline_cutoff
             if latest_sec is not None and (baseline_ts is None or latest_sec > baseline_ts):
                 reason = "NEW_SEC_FILING" if reason is None else f"{reason}+NEW_SEC_FILING"
                 new_filing_symbols.append(symbol)
@@ -116,6 +133,7 @@ def main() -> None:
     p.add_argument("--baseline-universe", type=Path, default=Path("data/baseline/current_universe.csv"))
     p.add_argument("--baseline-manifest", type=Path, default=Path("data/baseline/fundamentals_run_manifest.parquet"))
     p.add_argument("--baseline-long", type=Path, default=Path("data/baseline/fundamentals_point_in_time_long.parquet"))
+    p.add_argument("--baseline-pointer", type=Path, default=Path("data/baseline/fundamentals_current_pointer.json"))
     p.add_argument("--output", type=Path, default=Path("data/incremental/impacted_universe.csv"))
     p.add_argument("--summary", type=Path, default=Path("data/incremental/plan_summary.json"))
     args = p.parse_args()
@@ -124,6 +142,8 @@ def main() -> None:
     baseline_universe = pd.read_csv(args.baseline_universe, dtype=str)
     baseline_manifest = pd.read_parquet(args.baseline_manifest)
     baseline_long = pd.read_parquet(args.baseline_long)
+    pointer = json.loads(args.baseline_pointer.read_text(encoding="utf-8")) if args.baseline_pointer.exists() else {}
+    baseline_cutoff = pointer.get("updated_at")
     client = SecClient()
     plan, summary = build_incremental_plan(
         current_universe=current,
@@ -132,6 +152,7 @@ def main() -> None:
         baseline_long=baseline_long,
         client=client,
         mapping_cache=Path("data/incremental/sec_mapping"),
+        baseline_cutoff=baseline_cutoff,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if plan.empty:
