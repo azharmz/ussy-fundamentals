@@ -10,7 +10,7 @@ def _base_row(annual_accepted: str, annual_eps: float) -> pd.DataFrame:
             "annual_eps": annual_eps,
             "annual_eps_growth": 0.10,
             "annual_eps_accepted_at": pd.Timestamp(annual_accepted),
-            "annual_eps_filed_at": pd.Timestamp(annual_accepted),
+            "annual_eps_filed_at": pd.Timestamp(annual_accepted).tz_localize(None),
             "annual_eps_source_accession": "DIRECT-OLD",
             "annual_growth_source": "SAME_FILING_COMPARATIVE",
         }
