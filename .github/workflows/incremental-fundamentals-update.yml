@@ -4,6 +4,14 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '15 6 * * 1-6'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/incremental-fundamentals-update.yml'
+      - 'src/ussy_fundamentals/incremental_plan.py'
+      - 'src/ussy_fundamentals/merge_incremental.py'
+      - 'src/ussy_fundamentals/pull_current_r2.py'
+      - 'tests/test_incremental_update.py'
 
 permissions:
   contents: read
