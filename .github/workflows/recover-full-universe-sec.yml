@@ -1,0 +1,164 @@
+name: Recover full universe SEC fundamentals
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Original full-universe workflow run ID containing successful shard artifacts
+        required: true
+        default: "34289020143"
+        type: string
+      shard_count:
+        description: Original deterministic shard count
+        required: true
+        default: "24"
+        type: choice
+        options:
+          - "24"
+      failed_shards:
+        description: JSON array of shard indices to recover
+        required: true
+        default: "[2,4,8,12,20,21,23]"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: recover-full-universe-sec
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        shard: ${{ fromJSON(inputs.failed_shards) }}
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Download frozen universe contract from source run
+        uses: actions/download-artifact@v4
+        with:
+          name: current-universe-contract
+          path: seed
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Build this failed shard universe
+        run: |
+          python -m ussy_fundamentals.shard_universe \
+            --input seed/current_universe.csv \
+            --output data/universe.current.shard.csv \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count ${{ inputs.shard_count }}
+
+      - name: Run SEC PIT fundamentals pipeline
+        run: python -m ussy_fundamentals.pipeline --universe data/universe.current.shard.csv
+
+      - name: Audit recovered shard
+        run: python -m ussy_fundamentals.audit
+
+      - name: Upload recovered shard outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fundamentals-shard-${{ matrix.shard }}
+          path: |
+            data/processed/fundamentals_point_in_time_long.parquet
+            data/processed/fundamentals_point_in_time.parquet
+            data/processed/fundamentals_run_manifest.parquet
+            data/universe.current.shard.csv
+          if-no-files-found: error
+          retention-days: 7
+
+  merge:
+    needs: recover
+    if: ${{ always() && needs.recover.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+
+      - name: Download frozen universe contract from source run
+        uses: actions/download-artifact@v4
+        with:
+          name: current-universe-contract
+          path: seed
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download successful shard artifacts from source run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fundamentals-shard-*
+          path: data/shards
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download recovered shard artifacts from this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fundamentals-shard-*
+          path: data/shards
+          merge-multiple: false
+
+      - name: Merge and reconcile all 24 shards
+        run: |
+          python -m ussy_fundamentals.merge_shards \
+            --root data/shards \
+            --expected-universe seed/current_universe.csv
+          cp seed/current_universe_source.json data/processed/current_universe_source.json
+          cp seed/current_universe.csv data/processed/current_universe.csv
+
+      - name: Audit full requested universe
+        run: python -m ussy_fundamentals.audit
+
+      - name: Export consolidated CSV and JSON reports
+        run: python -m ussy_fundamentals.report
+
+      - name: Upload recovered full-universe outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fundamentals-full-universe-recovered
+          path: |
+            data/processed/fundamentals_point_in_time_long.parquet
+            data/processed/fundamentals_point_in_time.parquet
+            data/processed/fundamentals_run_manifest.parquet
+            data/processed/fundamentals_readiness_report.csv
+            data/processed/fundamentals_readiness_summary.json
+            data/processed/current_universe.csv
+            data/processed/current_universe_source.json
+          if-no-files-found: error
+          retention-days: 14
