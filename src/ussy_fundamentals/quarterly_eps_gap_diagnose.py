@@ -59,16 +59,25 @@ def _fallback_pair_periods(payload: dict, idx: dict[str, dict]) -> tuple[int, st
     sh = _direct_quarter_candidates(payload, idx, DILUTED_SHARES_TAGS, "diluted_shares")
     if ni.empty or sh.empty:
         return 0, None
-
     pairs = ni[["accession", "end"]].drop_duplicates().merge(
         sh[["accession", "end"]].drop_duplicates(), on=["accession", "end"], how="inner"
     )
     if pairs.empty:
         return 0, None
-    pairs = pairs.sort_values("end")
-    recent = _recent_window(pairs, 8)
+    recent = _recent_window(pairs.sort_values("end"), 8)
     latest = pd.to_datetime(recent["end"], errors="coerce").max()
     return int(recent["end"].nunique()), str(latest.date()) if pd.notna(latest) else None
+
+
+def _latest_supported_report(filing_rows: list[dict]) -> pd.Timestamp:
+    values = []
+    for row in filing_rows:
+        if row.get("form") not in {"10-Q", "10-Q/A", "10-K", "10-K/A"}:
+            continue
+        dt = pd.to_datetime(row.get("reportDate"), errors="coerce")
+        if pd.notna(dt):
+            values.append(dt)
+    return max(values) if values else pd.NaT
 
 
 def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict]) -> tuple[str, dict]:
@@ -104,12 +113,20 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
     direct_periods = int(direct_recent["end"].nunique()) if not direct_recent.empty else 0
     ytd_periods = int(ytd_recent["end"].nunique()) if not ytd_recent.empty else 0
 
-    configured_present = sorted(set(facts["tag"].dropna())) if not facts.empty else []
-    nonconfigured_eps_like = sorted(
-        tag for tag in eps_like if tag.split(":", 1)[-1] not in set(EPS_TAGS)
-    )
+    latest_direct = pd.to_datetime(current_direct["end"], errors="coerce").max() if not current_direct.empty else pd.NaT
+    earliest_direct = pd.to_datetime(current_direct["end"], errors="coerce").min() if not current_direct.empty else pd.NaT
+    latest_report = _latest_supported_report(filing_rows)
+    direct_span_days = int((latest_direct - earliest_direct).days) if pd.notna(latest_direct) and pd.notna(earliest_direct) else None
+    direct_stale_days = int((latest_report - latest_direct).days) if pd.notna(latest_report) and pd.notna(latest_direct) else None
 
-    if direct_periods >= 2 and norm_periods >= 2 and yoy_usable < 2:
+    configured_present = sorted(set(facts["tag"].dropna())) if not facts.empty else []
+    nonconfigured_eps_like = sorted(tag for tag in eps_like if tag.split(":", 1)[-1] not in set(EPS_TAGS))
+
+    if direct_periods >= 1 and direct_stale_days is not None and direct_stale_days > 180:
+        cls = "STANDARD_EPS_EVIDENCE_STALE"
+    elif direct_periods >= 1 and direct_periods <= 4 and direct_span_days is not None and direct_span_days < 330:
+        cls = "SHORT_QUARTERLY_HISTORY_EXPECTED"
+    elif direct_periods >= 2 and norm_periods >= 2 and yoy_usable < 2:
         cls = "DIRECT_EPS_PRESENT_YOY_COMPARATOR_GAP"
     elif direct_periods >= 2 and norm_periods < 2:
         cls = "DIRECT_EPS_PRESENT_NORMALIZATION_GAP"
@@ -131,12 +148,15 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
         "configured_tags_present": ";".join(configured_present),
         "nonconfigured_eps_like_tags": ";".join(nonconfigured_eps_like),
         "direct_current_quarter_periods": direct_periods,
+        "direct_history_span_days": direct_span_days,
+        "direct_evidence_stale_days": direct_stale_days,
+        "latest_supported_report_date": str(latest_report.date()) if pd.notna(latest_report) else None,
         "ytd_current_periods": ytd_periods,
         "normalized_recent_eps_periods": norm_periods,
         "normalized_recent_eps_yoy_usable": yoy_usable,
         "fallback_direct_net_income_shares_periods": fallback_periods,
         "fallback_latest_end": fallback_latest,
-        "latest_direct_end": str(pd.to_datetime(current_direct["end"], errors="coerce").max().date()) if not current_direct.empty else None,
+        "latest_direct_end": str(latest_direct.date()) if pd.notna(latest_direct) else None,
         "latest_normalized_end": str(pd.to_datetime(eps_norm["fiscal_period_end"], errors="coerce").max().date()) if not eps_norm.empty else None,
     }
     return cls, stats
@@ -144,10 +164,7 @@ def classify_symbol(symbol: str, cik: str, payload: dict, filing_rows: list[dict
 
 def diagnose(readiness_path: Path, output: Path, summary_output: Path) -> tuple[pd.DataFrame, dict]:
     readiness = pd.read_csv(readiness_path, dtype={"cik": str})
-    targets = readiness[
-        readiness["failure_class"].apply(lambda x: FAILURE in _split_failures(x))
-    ].copy()
-
+    targets = readiness[readiness["failure_class"].apply(lambda x: FAILURE in _split_failures(x))].copy()
     client = SecClient()
     rows = []
     for _, row in targets.sort_values("symbol").iterrows():
@@ -163,7 +180,6 @@ def diagnose(readiness_path: Path, output: Path, summary_output: Path) -> tuple[
     out = pd.DataFrame(rows)
     output.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(output, index=False)
-
     counts = out["diagnosis_class"].value_counts().to_dict() if not out.empty else {}
     summary = {
         "target_symbols": int(len(out)),
@@ -171,7 +187,6 @@ def diagnose(readiness_path: Path, output: Path, summary_output: Path) -> tuple[
         "fallback_candidates": int((out.get("fallback_direct_net_income_shares_periods", pd.Series(dtype=int)) >= 2).sum()) if not out.empty else 0,
     }
     summary_output.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
-
     print("=== QUARTERLY EPS GAP DIAGNOSIS ===")
     print(f"Target symbols: {len(out)}")
     for key, value in counts.items():
