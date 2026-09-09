@@ -89,11 +89,13 @@ def _derived_state(companyfacts: dict, filing_rows: list[dict]) -> pd.DataFrame:
 
 
 def fill_missing_annual_eps(normalized: pd.DataFrame, companyfacts: dict, filing_rows: list[dict]) -> pd.DataFrame:
-    """Fill only missing annual EPS state using transparent SEC-derived fallback.
+    """Augment annual EPS state with a transparent SEC-derived fallback.
 
-    Direct standardized EPS remains preferred. This fallback is used only when the SEC
-    companyfacts standardized EPS concepts are unavailable for an issuer (for example,
-    filings that present EPS through issuer-specific extensions).
+    Direct standardized EPS remains preferred whenever it is at least as recent as the
+    derived state. A derived state may replace a carried-forward direct EPS state only
+    when the derived filing was accepted later. This matters for issuers whose SEC
+    standardized EPS concept disappears after an older filing: the old direct value must
+    not block newer PIT-safe net-income-over-diluted-shares observations forever.
     """
     if normalized.empty:
         return normalized
@@ -103,13 +105,31 @@ def fill_missing_annual_eps(normalized: pd.DataFrame, companyfacts: dict, filing
         return normalized
 
     out = normalized.copy()
+    state = state.copy()
+    state["_accepted_utc"] = pd.to_datetime(state["accepted_at"], errors="coerce", utc=True)
+    state = state.dropna(subset=["_accepted_utc"]).sort_values("_accepted_utc")
+    if state.empty:
+        return normalized
+
     for i, row in out.iterrows():
-        if pd.notna(row.get("annual_eps")):
+        row_accepted = pd.to_datetime(row.get("accepted_at"), errors="coerce", utc=True)
+        if pd.isna(row_accepted):
             continue
-        available = state[state["accepted_at"] <= row["accepted_at"]]
+
+        available = state[state["_accepted_utc"] <= row_accepted]
         if available.empty:
             continue
         latest = available.iloc[-1]
+
+        current_state_accepted = pd.to_datetime(
+            row.get("annual_eps_accepted_at"), errors="coerce", utc=True
+        )
+        has_direct_or_existing = pd.notna(row.get("annual_eps"))
+        if has_direct_or_existing and pd.notna(current_state_accepted):
+            # Preserve direct/existing state when it is equally recent or newer.
+            if current_state_accepted >= latest["_accepted_utc"]:
+                continue
+
         out.at[i, "annual_eps"] = latest["annual_eps"]
         out.at[i, "annual_eps_growth"] = latest["annual_eps_growth"]
         out.at[i, "annual_eps_accepted_at"] = latest["accepted_at"]
