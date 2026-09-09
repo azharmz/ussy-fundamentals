@@ -1,0 +1,66 @@
+name: Probe nonstandard EPS tags
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ussy_fundamentals/nonstandard_eps_probe.py'
+      - '.github/workflows/nonstandard-eps-probe.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+
+      - name: Run regression tests
+        run: pytest -q
+
+      - name: Download latest quarterly EPS diagnosis
+        uses: actions/download-artifact@v4
+        with:
+          name: quarterly-eps-gap-diagnosis
+          path: seed
+          repository: azharmz/ussy-fundamentals
+          run-id: 34312174564
+          github-token: ${{ github.token }}
+
+      - name: Probe nonstandard EPS tags
+        run: |
+          mkdir -p data/processed
+          cp seed/quarterly_eps_gap_diagnosis.csv data/processed/quarterly_eps_gap_diagnosis.csv
+          python -m ussy_fundamentals.nonstandard_eps_probe
+          echo '--- summary ---'
+          cat data/processed/nonstandard_eps_probe_summary.json
+          echo '--- candidates ---'
+          cat data/processed/nonstandard_eps_probe.csv
+
+      - name: Upload probe report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nonstandard-eps-probe
+          path: |
+            data/processed/nonstandard_eps_probe.csv
+            data/processed/nonstandard_eps_probe_summary.json
+          if-no-files-found: error
+          retention-days: 14
