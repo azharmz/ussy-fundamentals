@@ -56,3 +56,24 @@ def test_classifies_direct_eps_with_comparator_gap():
     assert cls == "DIRECT_EPS_PRESENT_YOY_COMPARATOR_GAP"
     assert stats["direct_current_quarter_periods"] == 2
     assert stats["normalized_recent_eps_yoy_usable"] == 0
+
+
+def test_classifies_direct_net_income_shares_fallback_inputs():
+    payload = {
+        "facts": {
+            "us-gaap": {
+                "NetIncomeLoss": {"units": {"USD": [
+                    {"form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 100, "accn": "A1"},
+                    {"form": "10-Q", "start": "2025-04-01", "end": "2025-06-30", "val": 120, "accn": "A2"},
+                ]}},
+                "WeightedAverageNumberOfDilutedSharesOutstanding": {"units": {"shares": [
+                    {"form": "10-Q", "start": "2025-01-01", "end": "2025-03-31", "val": 10, "accn": "A1"},
+                    {"form": "10-Q", "start": "2025-04-01", "end": "2025-06-30", "val": 10, "accn": "A2"},
+                ]}},
+            }
+        }
+    }
+    filings = [_filing("A1", "2025-03-31"), _filing("A2", "2025-06-30")]
+    cls, stats = classify_symbol("TEST", "0000000001", payload, filings)
+    assert cls == "DIRECT_NET_INCOME_SHARES_FALLBACK_AVAILABLE"
+    assert stats["fallback_direct_net_income_shares_periods"] == 2
