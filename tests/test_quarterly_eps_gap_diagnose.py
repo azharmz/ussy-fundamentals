@@ -47,7 +47,7 @@ def test_classifies_short_quarterly_history_as_expected():
     assert stats["direct_current_quarter_periods"] == 2
 
 
-def test_classifies_longer_direct_history_with_comparator_gap():
+def test_classifies_longer_history_without_positive_comparators():
     # Five genuine discrete quarters spanning >330 days, intentionally without a
     # prior period inside the normal 330-400 day YoY matching band.
     starts = ["2024-01-01", "2024-04-10", "2024-07-20", "2024-10-30", "2025-02-08"]
@@ -60,9 +60,26 @@ def test_classifies_longer_direct_history_with_comparator_gap():
         filings.append(_filing(accn, end))
     payload = _fact("EarningsPerShareDiluted", entries)
     cls, stats = classify_symbol("TEST", "0000000001", payload, filings)
-    assert cls == "DIRECT_EPS_PRESENT_YOY_COMPARATOR_GAP"
+    assert cls == "POSITIVE_BASE_COMPARATORS_INSUFFICIENT"
     assert stats["direct_current_quarter_periods"] == 5
     assert stats["direct_history_span_days"] > 330
+    assert stats["positive_base_comparator_periods"] == 0
+
+
+def test_classifies_nonpositive_prior_base_as_data_constraint():
+    entries = [
+        {"form":"10-Q","start":"2024-01-01","end":"2024-03-31","val":-0.50,"accn":"A1"},
+        {"form":"10-Q","start":"2024-04-01","end":"2024-06-30","val":-0.40,"accn":"A2"},
+        {"form":"10-Q","start":"2024-07-01","end":"2024-09-30","val":-0.30,"accn":"A3"},
+        {"form":"10-Q","start":"2025-01-01","end":"2025-03-31","val":0.10,"accn":"A4"},
+        {"form":"10-Q","start":"2025-04-01","end":"2025-06-30","val":0.20,"accn":"A5"},
+    ]
+    filings = [_filing(f"A{i}", e["end"]) for i, e in enumerate(entries, 1)]
+    payload = _fact("EarningsPerShareDiluted", entries)
+    cls, stats = classify_symbol("TEST", "0000000001", payload, filings)
+    assert cls == "POSITIVE_BASE_COMPARATORS_INSUFFICIENT"
+    assert stats["positive_base_comparator_periods"] == 0
+    assert stats["nonpositive_base_comparator_periods"] >= 2
 
 
 def test_classifies_stale_standard_eps_evidence():
