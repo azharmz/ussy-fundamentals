@@ -84,6 +84,9 @@ def test_combine_readiness_keeps_requested_universe_denominator():
             "symbol": ["FULL", "FALLBACK", "FAIL"],
             "status": ["PASS_FULL", "PASS_3Y_FALLBACK", "FAIL_PRODUCTION_COVERAGE"],
             "failure_class": [pd.NA, pd.NA, "ANNUAL_LT_3Y"],
+            "annual_years": [5, 3, 2],
+            "quarterly_eps_yoy_evaluable": [6, 4, 3],
+            "quarterly_revenue_yoy_usable": [7, 5, 4],
         }
     )
 
@@ -95,3 +98,6 @@ def test_combine_readiness_keeps_requested_universe_denominator():
     assert out.loc["FAIL", "production_status"] == "FAIL_PRODUCTION_COVERAGE"
     assert out.loc["FPI", "production_status"] == "UNSUPPORTED_FPI"
     assert out.loc["FPI", "failure_class"] == "UNSUPPORTED_FPI"
+    assert out.loc["FAIL", "annual_years"] == 2
+    assert out.loc["FULL", "quarterly_eps_yoy_evaluable"] == 6
+    assert out.loc["FPI", "annual_years"] != out.loc["FPI", "annual_years"]  # NaN
