@@ -107,6 +107,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     if: ${{ always() && needs.shard.result == 'success' }}
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -159,3 +165,5 @@ jobs:
             data/processed/current_universe_source.json
           if-no-files-found: error
           retention-days: 30
+      - name: Publish immutable production snapshot to R2
+        run: python -m ussy_fundamentals.publish_r2
