@@ -21,12 +21,30 @@ def _split_failures(value) -> set[str]:
 
 
 def _eps_like_tags(payload: dict) -> list[str]:
+    """Return plausible reported EPS-value concepts, not EPS-related disclosures.
+
+    Companyfacts includes concepts whose names contain ``EarningsPerShare`` but whose
+    values are share counts or pro-forma disclosures (for example antidilutive shares
+    excluded from the EPS computation). Those are not substitutes for reported EPS and
+    must not make a symbol look like it has a usable nonstandard EPS tag.
+    """
+    excluded_fragments = (
+        "antidilutive",
+        "excludedfromcomputation",
+        "proforma",
+    )
     out = []
     for namespace, concepts in payload.get("facts", {}).items():
-        for tag in concepts:
+        for tag, concept in concepts.items():
             low = tag.lower()
-            if "earningspershare" in low or "perdilutedshare" in low or "perbasicshare" in low:
-                out.append(f"{namespace}:{tag}")
+            if any(fragment in low for fragment in excluded_fragments):
+                continue
+            if not ("earningspershare" in low or low.endswith("perdilutedshare") or low.endswith("perbasicshare")):
+                continue
+            units = concept.get("units", {}) if isinstance(concept, dict) else {}
+            if not units or not any(entries for entries in units.values()):
+                continue
+            out.append(f"{namespace}:{tag}")
     return sorted(out)
 
 
@@ -82,12 +100,6 @@ def _latest_supported_report(filing_rows: list[dict]) -> pd.Timestamp:
 
 
 def _comparator_base_counts(current_direct: pd.DataFrame, eps_norm: pd.DataFrame) -> tuple[int, int]:
-    """Count recent PIT-safe prior-year bases that are positive vs non-positive.
-
-    This mirrors the normalizer's prior-observation window, but deliberately measures
-    whether a mathematically valid positive EPS base exists. If it does not, missing YoY
-    is a data/property constraint rather than a comparator implementation bug.
-    """
     if current_direct.empty or eps_norm.empty:
         return 0, 0
 
