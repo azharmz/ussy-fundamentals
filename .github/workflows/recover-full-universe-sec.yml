@@ -146,7 +146,9 @@ jobs:
         run: python -m ussy_fundamentals.audit
 
       - name: Export consolidated CSV and JSON reports
-        run: python -m ussy_fundamentals.report
+        run: |
+          python -m ussy_fundamentals.report
+          python -m ussy_fundamentals.exception_taxonomy
 
       - name: Upload recovered full-universe outputs
         uses: actions/upload-artifact@v4
@@ -158,6 +160,8 @@ jobs:
             data/processed/fundamentals_run_manifest.parquet
             data/processed/fundamentals_readiness_report.csv
             data/processed/fundamentals_readiness_summary.json
+            data/processed/fundamentals_exception_taxonomy.csv
+            data/processed/fundamentals_exception_taxonomy_summary.json
             data/processed/current_universe.csv
             data/processed/current_universe_source.json
           if-no-files-found: error
