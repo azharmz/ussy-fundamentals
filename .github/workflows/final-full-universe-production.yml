@@ -1,0 +1,165 @@
+name: Final full-universe production readiness
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/final-full-universe-production.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: final-full-universe-production
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+      - name: Run regression suite
+        run: pytest -q
+      - name: Freeze canonical R2 universe
+        run: python -m ussy_fundamentals.universe_source
+      - name: Build 24-shard matrix
+        id: matrix
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          print('matrix=' + json.dumps(list(range(24))))
+          PY
+      - name: Upload frozen universe contract
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-current-universe-contract
+          path: |
+            data/processed/current_universe.csv
+            data/processed/current_universe_source.json
+          if-no-files-found: error
+          retention-days: 14
+
+  shard:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Download frozen universe contract
+        uses: actions/download-artifact@v4
+        with:
+          name: final-current-universe-contract
+          path: seed
+      - name: Build deterministic shard
+        run: |
+          python -m ussy_fundamentals.shard_universe \
+            --input seed/current_universe.csv \
+            --output data/universe.current.shard.csv \
+            --shard-index ${{ matrix.shard }} \
+            --shard-count 24
+      - name: Run SEC PIT fundamentals pipeline
+        run: python -m ussy_fundamentals.pipeline --universe data/universe.current.shard.csv
+      - name: Audit shard
+        run: python -m ussy_fundamentals.audit
+      - name: Upload shard output
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-fundamentals-shard-${{ matrix.shard }}
+          path: |
+            data/processed/fundamentals_point_in_time_long.parquet
+            data/processed/fundamentals_point_in_time.parquet
+            data/processed/fundamentals_run_manifest.parquet
+            data/universe.current.shard.csv
+          if-no-files-found: error
+          retention-days: 14
+
+  merge:
+    needs: [prepare, shard]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    if: ${{ always() && needs.shard.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Download frozen universe contract
+        uses: actions/download-artifact@v4
+        with:
+          name: final-current-universe-contract
+          path: seed
+      - name: Download all shard outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: final-fundamentals-shard-*
+          path: data/shards
+      - name: Merge and reconcile all shards
+        run: |
+          python -m ussy_fundamentals.merge_shards \
+            --root data/shards \
+            --expected-universe seed/current_universe.csv
+          cp seed/current_universe_source.json data/processed/current_universe_source.json
+          cp seed/current_universe.csv data/processed/current_universe.csv
+      - name: Audit final full universe
+        run: python -m ussy_fundamentals.audit
+      - name: Build consolidated readiness and exception taxonomy
+        run: |
+          python -m ussy_fundamentals.report
+          python -m ussy_fundamentals.exception_taxonomy
+          python -m ussy_fundamentals.final_production_report
+          echo '--- FINAL PRODUCTION SUMMARY ---'
+          cat data/processed/fundamentals_final_production_summary.json
+      - name: Upload final production package
+        uses: actions/upload-artifact@v4
+        with:
+          name: fundamentals-final-production
+          path: |
+            data/processed/fundamentals_point_in_time_long.parquet
+            data/processed/fundamentals_point_in_time.parquet
+            data/processed/fundamentals_run_manifest.parquet
+            data/processed/fundamentals_readiness_report.csv
+            data/processed/fundamentals_readiness_summary.json
+            data/processed/fundamentals_exception_taxonomy.csv
+            data/processed/fundamentals_exception_taxonomy_summary.json
+            data/processed/fundamentals_final_production_report.csv
+            data/processed/fundamentals_final_production_summary.json
+            data/processed/current_universe.csv
+            data/processed/current_universe_source.json
+          if-no-files-found: error
+          retention-days: 30
