@@ -22,8 +22,17 @@ def run(url: str, output: Path) -> dict:
     with zipfile.ZipFile(BytesIO(raw)) as zf:
         names = zf.namelist()
         listing = []
+        tsv_headers = {}
         for info in zf.infolist():
             listing.append({'name': info.filename, 'size': info.file_size})
+            if info.filename.upper().endswith('.TSV'):
+                with zf.open(info) as fh:
+                    first = fh.readline().decode('utf-8-sig', errors='replace').rstrip('\r\n')
+                    second = fh.readline().decode('utf-8-sig', errors='replace').rstrip('\r\n')
+                tsv_headers[info.filename] = {
+                    'columns': first.split('\t'),
+                    'sample_row': second.split('\t'),
+                }
     summary = {
         'url': url,
         'size_bytes': len(raw),
@@ -31,6 +40,7 @@ def run(url: str, output: Path) -> dict:
         'zip_valid': True,
         'file_count': len(names),
         'files': listing,
+        'tsv_headers': tsv_headers,
         'strategy_returns_inspected': False,
     }
     (output / 'summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True), encoding='utf-8')
