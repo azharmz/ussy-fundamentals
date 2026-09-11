@@ -30,11 +30,17 @@ def _read_tsv(zf: zipfile.ZipFile, name: str, **kwargs) -> pd.DataFrame:
     return pd.read_csv(zf.open(name), sep='\t', dtype='string', low_memory=False, **kwargs)
 
 
+def _clean(value) -> str:
+    if value is None or pd.isna(value):
+        return ''
+    return str(value).strip()
+
+
 def _amendment_state(row: pd.Series) -> str:
-    form = str(row.get('SUBMISSIONTYPE') or '').upper().strip()
+    form = _clean(row.get('SUBMISSIONTYPE')).upper()
     if form == '13F-HR':
         return 'BASE'
-    typ = str(row.get('AMENDMENTTYPE') or '').upper().strip()
+    typ = _clean(row.get('AMENDMENTTYPE')).upper()
     if 'RESTATEMENT' in typ:
         return 'AMENDMENT_RESTATEMENT'
     if 'NEW' in typ and 'HOLDING' in typ:
@@ -51,8 +57,11 @@ def run(url: str, universe_csv: Path, output_dir: Path) -> dict:
         cover = _read_tsv(zf, 'COVERPAGE.tsv')
         sub = sub[sub['SUBMISSIONTYPE'].str.upper().isin(['13F-HR', '13F-HR/A'])].copy()
         meta = sub.merge(cover, how='left', on='ACCESSION_NUMBER', suffixes=('', '_COVER'))
-        meta['FILING_DATE_PARSED'] = pd.to_datetime(meta['FILING_DATE'], errors='coerce')
-        meta['PERIOD_PARSED'] = pd.to_datetime(meta['PERIODOFREPORT'], errors='coerce')
+        meta['FILING_DATE_PARSED'] = pd.to_datetime(meta['FILING_DATE'], format='%d-%b-%Y', errors='coerce')
+        meta['PERIOD_PARSED'] = pd.to_datetime(meta['PERIODOFREPORT'], format='%d-%b-%Y', errors='coerce')
+        # SEC bulk lacks exact acceptance timestamps. Historical v1 intentionally waits
+        # until the next calendar date rather than treating filing date/quarter end as
+        # intraday availability.
         meta['available_on'] = (meta['FILING_DATE_PARSED'] + pd.Timedelta(days=1)).dt.date.astype('string')
         meta['period_of_report'] = meta['PERIOD_PARSED'].dt.date.astype('string')
         meta['amendment_state'] = meta.apply(_amendment_state, axis=1)
@@ -64,11 +73,11 @@ def run(url: str, universe_csv: Path, output_dir: Path) -> dict:
         reader = pd.read_csv(zf.open('INFOTABLE.tsv'), sep='\t', dtype='string', chunksize=250_000, low_memory=False)
         for chunk in reader:
             total_info_rows += len(chunk)
-            chunk = chunk[chunk['ACCESSION_NUMBER'].isin(accession_set)]
+            chunk = chunk[chunk['ACCESSION_NUMBER'].isin(accession_set)].copy()
             chunk['CUSIP'] = chunk['CUSIP'].astype('string').str.upper().str.strip()
-            chunk = chunk[chunk['CUSIP'].isin(target)]
+            chunk = chunk[chunk['CUSIP'].isin(target)].copy()
             if 'PUTCALL' in chunk.columns:
-                chunk = chunk[chunk['PUTCALL'].isna() | chunk['PUTCALL'].astype('string').str.strip().eq('')]
+                chunk = chunk[chunk['PUTCALL'].isna() | chunk['PUTCALL'].astype('string').str.strip().eq('')].copy()
             matched_raw_rows += len(chunk)
             if not chunk.empty:
                 for c in ['VALUE', 'SSHPRNAMT']:
