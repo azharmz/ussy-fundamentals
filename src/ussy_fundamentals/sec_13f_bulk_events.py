@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from .sec_client import SecClient
+from .sec_13f_filing import classify_amendment_state, parse_filing_meta
+from .sec_client import SEC_WWW, SecClient
 
 DEFAULT_URL = 'https://www.sec.gov/files/structureddata/data/form-13f-data-sets/01mar2026-31may2026_form13f.zip'
 
@@ -48,10 +49,39 @@ def _amendment_state(row: pd.Series) -> str:
     return 'AMENDMENT_UNCLASSIFIED'
 
 
+def _filing_text_url(cik: str, accession: str) -> str:
+    cik_int = str(int(str(cik)))
+    nodash = str(accession).replace('-', '')
+    return f'{SEC_WWW}/Archives/edgar/data/{cik_int}/{nodash}/{accession}.txt'
+
+
+def _hydrate_ambiguous_amendments(meta: pd.DataFrame, client: SecClient) -> tuple[pd.DataFrame, int, int]:
+    meta = meta.copy()
+    mask = meta['amendment_state'].eq('AMENDMENT_UNCLASSIFIED')
+    attempted = int(mask.sum())
+    resolved = 0
+    for idx in meta.index[mask]:
+        row = meta.loc[idx]
+        try:
+            text = client.get_text(_filing_text_url(str(row['CIK']), str(row['ACCESSION_NUMBER'])))
+            parsed = parse_filing_meta(text)
+            state = classify_amendment_state(parsed)
+            if state in {'AMENDMENT_RESTATEMENT', 'AMENDMENT_NEW_HOLDINGS'}:
+                meta.at[idx, 'amendment_state'] = state
+                if not _clean(meta.at[idx, 'AMENDMENTTYPE']):
+                    meta.at[idx, 'AMENDMENTTYPE'] = parsed.amendment_type
+                resolved += 1
+        except Exception:
+            # Leave unresolved; downstream gate keeps it non-attachable.
+            pass
+    return meta, attempted, resolved
+
+
 def run(url: str, universe_csv: Path, output_dir: Path) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     target, us_count, non_us_count = _target_cusips(universe_csv)
-    raw = SecClient().get_bytes(url)
+    client = SecClient()
+    raw = client.get_bytes(url)
     with zipfile.ZipFile(BytesIO(raw)) as zf:
         sub = _read_tsv(zf, 'SUBMISSION.tsv')
         cover = _read_tsv(zf, 'COVERPAGE.tsv')
@@ -65,6 +95,7 @@ def run(url: str, universe_csv: Path, output_dir: Path) -> dict:
         meta['available_on'] = (meta['FILING_DATE_PARSED'] + pd.Timedelta(days=1)).dt.date.astype('string')
         meta['period_of_report'] = meta['PERIOD_PARSED'].dt.date.astype('string')
         meta['amendment_state'] = meta.apply(_amendment_state, axis=1)
+        meta, ambiguous_hydration_attempted, ambiguous_hydration_resolved = _hydrate_ambiguous_amendments(meta, client)
 
         accession_set = set(meta['ACCESSION_NUMBER'].dropna())
         filtered_parts = []
@@ -112,6 +143,8 @@ def run(url: str, universe_csv: Path, output_dir: Path) -> dict:
         'restatement_count': int(meta_out['amendment_state'].eq('AMENDMENT_RESTATEMENT').sum()),
         'new_holdings_count': int(meta_out['amendment_state'].eq('AMENDMENT_NEW_HOLDINGS').sum()),
         'unclassified_amendment_count': ambiguous,
+        'ambiguous_hydration_attempted': ambiguous_hydration_attempted,
+        'ambiguous_hydration_resolved': ambiguous_hydration_resolved,
         'filing_date_complete_rate': float(meta_out['FILING_DATE'].notna().mean()) if len(meta_out) else 0.0,
         'period_complete_rate': float(meta_out['period_of_report'].notna().mean()) if len(meta_out) else 0.0,
         'infotable_total_rows': int(total_info_rows),
