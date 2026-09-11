@@ -1,0 +1,49 @@
+name: SEC 13F historical PIT state smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sec-13f-history-smoke.yml'
+      - 'src/ussy_fundamentals/sec_13f_history_state.py'
+      - 'tests/test_sec_13f_history_state.py'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+      - name: Test historical event-state semantics
+        run: pytest -q tests/test_sec_13f_history_state.py tests/test_sec_13f_filing.py
+      - name: Freeze canonical universe
+        run: python -m ussy_fundamentals.universe_source
+      - name: Process first three official historical data sets
+        run: python -m ussy_fundamentals.sec_13f_history_state --universe data/processed/current_universe.csv --output-dir data/13f/history_smoke --max-datasets 3
+      - name: Show summary
+        run: cat data/13f/history_smoke/summary.json
+      - name: Upload evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: sec-13f-history-smoke-${{ github.run_id }}
+          path: data/13f/history_smoke/
+          retention-days: 14
