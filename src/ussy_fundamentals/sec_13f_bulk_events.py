@@ -27,8 +27,21 @@ def _target_cusips(universe_csv: Path) -> tuple[set[str], int, int]:
     return target, us, non_us
 
 
+def _zip_member(zf: zipfile.ZipFile, name: str) -> str:
+    """Resolve SEC bulk members case-insensitively.
+
+    SEC historical archives have drifted between upper/lower-case member names.
+    Reject missing or ambiguous matches rather than silently choosing a file.
+    """
+    target = name.casefold()
+    matches = [member for member in zf.namelist() if Path(member).name.casefold() == target]
+    if len(matches) != 1:
+        raise KeyError(f'Expected exactly one ZIP member matching {name!r}; found {matches!r}')
+    return matches[0]
+
+
 def _read_tsv(zf: zipfile.ZipFile, name: str, **kwargs) -> pd.DataFrame:
-    return pd.read_csv(zf.open(name), sep='\t', dtype='string', low_memory=False, **kwargs)
+    return pd.read_csv(zf.open(_zip_member(zf, name)), sep='\t', dtype='string', low_memory=False, **kwargs)
 
 
 def _clean(value) -> str:
@@ -101,7 +114,8 @@ def run(url: str, universe_csv: Path, output_dir: Path) -> dict:
         filtered_parts = []
         total_info_rows = 0
         matched_raw_rows = 0
-        reader = pd.read_csv(zf.open('INFOTABLE.tsv'), sep='\t', dtype='string', chunksize=250_000, low_memory=False)
+        info_member = _zip_member(zf, 'INFOTABLE.tsv')
+        reader = pd.read_csv(zf.open(info_member), sep='\t', dtype='string', chunksize=250_000, low_memory=False)
         for chunk in reader:
             total_info_rows += len(chunk)
             chunk = chunk[chunk['ACCESSION_NUMBER'].isin(accession_set)].copy()
