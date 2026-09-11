@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -44,8 +45,8 @@ def acceptance_datetime_from_submission_text(text: str) -> str | None:
     match = ACCEPTANCE_RE.search(text)
     if not match:
         return None
-    value = match.group(1)
-    return pd.Timestamp.strptime(value, "%Y%m%d%H%M%S").isoformat()
+    dt = datetime.strptime(match.group(1), "%Y%m%d%H%M%S")
+    return dt.isoformat()
 
 
 def filing_text_url(manager_cik: str, accession_nodash: str, archive_filename: str) -> str:
