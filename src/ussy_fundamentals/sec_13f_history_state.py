@@ -14,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .sec_13f_bulk_catalog import discover
-from .sec_13f_bulk_events import _amendment_state, _hydrate_ambiguous_amendments, _read_tsv, _target_cusips
+from .sec_13f_bulk_events import _amendment_state, _hydrate_ambiguous_amendments, _read_tsv, _target_cusips, _zip_member
 from .sec_client import SecClient
 
 
@@ -89,7 +89,8 @@ def _extract_dataset(url: str, target: set[str], client: SecClient) -> tuple[pd.
         pieces = []
         total_info = 0
         target_rows = 0
-        reader = pd.read_csv(zf.open('INFOTABLE.tsv'), sep='\t', dtype='string', chunksize=250_000, low_memory=False)
+        info_member = _zip_member(zf, 'INFOTABLE.tsv')
+        reader = pd.read_csv(zf.open(info_member), sep='\t', dtype='string', chunksize=250_000, low_memory=False)
         for chunk in reader:
             total_info += len(chunk)
             chunk = chunk[chunk['ACCESSION_NUMBER'].isin(accession_set)].copy()
@@ -153,7 +154,6 @@ def _apply_filing(con: sqlite3.Connection, manager: str, period: str, accession:
             new[cusip] = (ov+v, os+s)
         action = 'ADD'
     elif state == 'AMENDMENT_NEW_HOLDINGS' and old_status is None:
-        # A supplement without its base cannot produce a complete manager-period state.
         new_status = 'AMBIGUOUS'
         new = {}
         action = 'AMBIGUOUS_NO_BASE'
