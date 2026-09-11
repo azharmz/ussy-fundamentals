@@ -11,6 +11,8 @@ ACCEPTANCE_RE = re.compile(r"<ACCEPTANCE-DATETIME>(\d{14})", re.I)
 DOCUMENT_RE = re.compile(r"<DOCUMENT>(.*?)</DOCUMENT>", re.I | re.S)
 TYPE_RE = re.compile(r"<TYPE>\s*([^\r\n<]+)", re.I)
 TEXT_RE = re.compile(r"<TEXT>(.*)</TEXT>", re.I | re.S)
+XML_RE = re.compile(r"<XML>\s*(.*?)\s*</XML>", re.I | re.S)
+XBRL_RE = re.compile(r"<XBRL>\s*(.*?)\s*</XBRL>", re.I | re.S)
 
 
 @dataclass(frozen=True)
@@ -33,27 +35,34 @@ def _first_text(root: ET.Element, names: Iterable[str]) -> str | None:
     return None
 
 
+def _candidate_xml_payloads(block: str) -> list[str]:
+    payloads: list[str] = []
+    for rx in (XML_RE, XBRL_RE):
+        payloads.extend(m.group(1).strip() for m in rx.finditer(block))
+    if payloads:
+        return payloads
+    tm = TEXT_RE.search(block)
+    payload = tm.group(1).strip() if tm else block.strip()
+    start = payload.find("<?xml")
+    if start < 0:
+        for marker in ("<edgarSubmission", "<informationTable", "<form13FFileNumber"):
+            p = payload.find(marker)
+            if p >= 0:
+                start = p
+                break
+    return [payload[start:]] if start >= 0 else []
+
+
 def _xml_roots_from_submission(text: str) -> list[tuple[str, ET.Element]]:
     roots: list[tuple[str, ET.Element]] = []
     for block in DOCUMENT_RE.findall(text):
         typem = TYPE_RE.search(block)
         doctype = typem.group(1).strip() if typem else ""
-        tm = TEXT_RE.search(block)
-        payload = tm.group(1).strip() if tm else block.strip()
-        start = payload.find("<?xml")
-        if start < 0:
-            for marker in ("<edgarSubmission", "<informationTable", "<form13FFileNumber"):
-                p = payload.find(marker)
-                if p >= 0:
-                    start = p
-                    break
-        if start < 0:
-            continue
-        xml = payload[start:]
-        try:
-            roots.append((doctype, ET.fromstring(xml)))
-        except ET.ParseError:
-            continue
+        for xml in _candidate_xml_payloads(block):
+            try:
+                roots.append((doctype, ET.fromstring(xml)))
+            except ET.ParseError:
+                continue
     return roots
 
 
@@ -69,7 +78,7 @@ def parse_filing_meta(text: str) -> FilingMeta:
     for doctype, root in _xml_roots_from_submission(text):
         if doctype.upper().startswith("INFORMATION TABLE"):
             continue
-        period = period or _first_text(root, ["periodOfReport"])
+        period = period or _first_text(root, ["periodOfReport", "reportCalendarOrQuarter"])
         raw_amend = _first_text(root, ["isAmendment"])
         if raw_amend is not None:
             is_amendment = raw_amend.strip().lower() in {"true", "1", "yes"}
