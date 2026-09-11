@@ -1,0 +1,35 @@
+name: SEC 13F bulk catalog
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sec-13f-bulk-catalog.yml'
+      - 'src/ussy_fundamentals/sec_13f_bulk_catalog.py'
+
+permissions:
+  contents: read
+
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Discover official SEC 13F data sets
+        run: python -m ussy_fundamentals.sec_13f_bulk_catalog --output data/13f/bulk_catalog.json
+      - name: Upload evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: sec-13f-bulk-catalog-${{ github.run_id }}
+          path: data/13f/bulk_catalog.json
+          retention-days: 14
