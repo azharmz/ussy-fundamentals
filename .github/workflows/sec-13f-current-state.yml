@@ -1,0 +1,54 @@
+name: SEC 13F current PIT state
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sec-13f-current-state.yml'
+      - 'src/ussy_fundamentals/sec_13f_current_state.py'
+      - 'src/ussy_fundamentals/sec_13f_filing.py'
+      - 'tests/test_sec_13f_current_state.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sec-13f-current-state
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+      - name: Run 13F regression tests
+        run: pytest -q tests/test_sec_13f_index.py tests/test_sec_13f_filing.py tests/test_sec_13f_current_state.py
+      - name: Freeze canonical universe
+        run: python -m ussy_fundamentals.universe_source
+      - name: Build Q3-2026 filing-calendar PIT state
+        run: python -m ussy_fundamentals.sec_13f_current_state --year 2026 --quarter 3 --universe data/processed/current_universe.csv --output-dir data/13f/current_state
+      - name: Show summary
+        run: cat data/13f/current_state/summary.json
+      - name: Upload evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: sec-13f-current-state-${{ github.run_id }}
+          path: data/13f/current_state/
+          retention-days: 14

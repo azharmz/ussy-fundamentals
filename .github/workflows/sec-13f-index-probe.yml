@@ -1,0 +1,44 @@
+name: SEC 13F index probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ussy_fundamentals/sec_client.py'
+      - 'src/ussy_fundamentals/sec_13f_index.py'
+      - 'tests/test_sec_13f_index.py'
+      - '.github/workflows/sec-13f-index-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+      - name: Run 13F parser regression tests
+        run: pytest -q tests/test_sec_13f_index.py
+      - name: Fetch Q2 2026 13F filing index and hydrate sample accepted_at
+        run: python -m ussy_fundamentals.sec_13f_index --year 2026 --quarter 2 --hydrate-sample 10 --output-dir data/13f/index_probe
+      - name: Show summary
+        run: cat data/13f/index_probe/summary.json
+      - name: Upload evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: sec-13f-index-probe-${{ github.run_id }}
+          path: data/13f/index_probe/
+          retention-days: 14

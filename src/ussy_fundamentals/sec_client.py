@@ -22,18 +22,32 @@ class SecClient:
         self.session = requests.Session()
         self.last_request = 0.0
 
-    def get_json(self, url: str) -> dict[str, Any]:
+    def _get(self, url: str, *, accept: str | None = None) -> requests.Response:
         elapsed = time.time() - self.last_request
         if elapsed < REQUEST_DELAY:
             time.sleep(REQUEST_DELAY - elapsed)
-        r = self.session.get(
-            url,
-            headers={"User-Agent": self.user_agent, "Accept-Encoding": "gzip, deflate"},
-            timeout=60,
-        )
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept-Encoding": "gzip, deflate",
+        }
+        if accept:
+            headers["Accept"] = accept
+        r = self.session.get(url, headers=headers, timeout=60)
         self.last_request = time.time()
         r.raise_for_status()
-        return r.json()
+        return r
+
+    def get_json(self, url: str) -> dict[str, Any]:
+        return self._get(url, accept="application/json").json()
+
+    def get_text(self, url: str) -> str:
+        r = self._get(url, accept="text/plain,text/html,application/xhtml+xml,*/*")
+        if r.encoding is None:
+            r.encoding = "utf-8"
+        return r.text
+
+    def get_bytes(self, url: str) -> bytes:
+        return self._get(url, accept="application/octet-stream,application/zip,*/*").content
 
 
 def save_json_immutable(path: Path, payload: dict) -> None:

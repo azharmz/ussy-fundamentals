@@ -1,0 +1,110 @@
+name: Incremental fundamentals update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 6 * * 1-6'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/incremental-fundamentals-update.yml'
+      - 'src/ussy_fundamentals/incremental_plan.py'
+      - 'src/ussy_fundamentals/merge_incremental.py'
+      - 'src/ussy_fundamentals/pull_current_r2.py'
+      - 'tests/test_incremental_update.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: incremental-fundamentals-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+
+      - name: Run incremental regression tests
+        run: pytest -q tests/test_incremental_update.py tests/test_publish_r2.py
+
+      - name: Freeze latest canonical universe
+        run: python -m ussy_fundamentals.universe_source
+
+      - name: Download current fundamentals baseline from R2
+        run: python -m ussy_fundamentals.pull_current_r2 --output-dir data/baseline
+
+      - name: Plan impacted securities
+        id: plan
+        run: |
+          python -m ussy_fundamentals.incremental_plan
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          s = json.loads(Path('data/incremental/plan_summary.json').read_text())
+          print(f"impacted={s['impacted_symbols']}")
+          print(f"needs_update={'true' if s['needs_update'] else 'false'}")
+          print(f"removed={len(s['removed_symbols'])}")
+          PY
+
+      - name: Run SEC PIT pipeline only for impacted securities
+        if: steps.plan.outputs.impacted != '0'
+        run: |
+          python -m ussy_fundamentals.pipeline --universe data/incremental/impacted_universe.csv
+          mkdir -p data/delta
+          mv data/processed/fundamentals_point_in_time_long.parquet data/delta/
+          mv data/processed/fundamentals_point_in_time.parquet data/delta/
+          mv data/processed/fundamentals_run_manifest.parquet data/delta/
+
+      - name: Merge delta into current baseline
+        if: steps.plan.outputs.needs_update == 'true'
+        run: |
+          python -m ussy_fundamentals.merge_incremental \
+            --baseline-dir data/baseline \
+            --delta-dir data/delta \
+            --current-universe data/processed/current_universe.csv \
+            --output-dir data/processed
+
+      - name: Audit and rebuild production reports
+        if: steps.plan.outputs.needs_update == 'true'
+        run: |
+          python -m ussy_fundamentals.audit
+          python -m ussy_fundamentals.report
+          python -m ussy_fundamentals.exception_taxonomy
+          python -m ussy_fundamentals.final_production_report
+          cat data/processed/fundamentals_final_production_summary.json
+
+      - name: Publish new immutable R2 snapshot
+        if: steps.plan.outputs.needs_update == 'true'
+        run: python -m ussy_fundamentals.publish_r2
+
+      - name: Upload incremental diagnostics
+        uses: actions/upload-artifact@v7
+        with:
+          name: fundamentals-incremental-${{ github.run_id }}
+          path: |
+            data/incremental/plan_summary.json
+            data/incremental/impacted_universe.csv
+            data/processed/fundamentals_final_production_summary.json
+            data/processed/fundamentals_final_production_report.csv
+          if-no-files-found: ignore
+          retention-days: 14

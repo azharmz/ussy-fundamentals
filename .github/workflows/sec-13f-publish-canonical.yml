@@ -1,0 +1,63 @@
+name: SEC 13F canonical sponsorship publish
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sec-13f-publish-canonical.yml'
+      - 'src/ussy_fundamentals/sec_13f_publish.py'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: sec-13f-publish-canonical
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Download canonical full-history evidence
+        run: |
+          mkdir -p data/13f/history_full
+          gh run download 34654725293 --repo azharmz/ussy-fundamentals --name sec-13f-history-full-34654725293 --dir data/13f/history_full
+      - name: Download canonical uncertainty evidence
+        run: |
+          mkdir -p data/13f/uncertainty_full
+          gh run download 34656995462 --repo azharmz/ussy-fundamentals --name sec-13f-uncertainty-34656995462 --dir data/13f/uncertainty_full
+      - name: Audit inputs before publish
+        run: |
+          test -f data/13f/history_full/sponsorship_state_events.parquet
+          test -f data/13f/history_full/final_period_state.parquet
+          test -f data/13f/history_full/summary.json
+          test -f data/13f/uncertainty_full/uncertainty_state_events.parquet
+          test -f data/13f/uncertainty_full/current_uncertainty_state.parquet
+          test -f data/13f/uncertainty_full/uncertainty_summary.json
+          cat data/13f/history_full/summary.json
+          cat data/13f/uncertainty_full/uncertainty_summary.json
+      - name: Publish immutable snapshot then pointer
+        run: |
+          python -m ussy_fundamentals.sec_13f_publish \
+            --history-root data/13f/history_full \
+            --uncertainty-root data/13f/uncertainty_full \
+            --history-run-id 34654725293 \
+            --history-commit 7559b13e45e696745c89713462e42dc83b4e5acc \
+            --uncertainty-run-id 34656995462 \
+            --uncertainty-commit 1c44b7c90b54d6689638dc2ac44b3a6fb02f99eb

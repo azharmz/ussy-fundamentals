@@ -1,0 +1,36 @@
+name: SEC 13F bulk download probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sec-13f-bulk-probe.yml'
+      - 'src/ussy_fundamentals/sec_13f_bulk_probe.py'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install package
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Download and validate official SEC 13F bulk ZIP
+        run: python -m ussy_fundamentals.sec_13f_bulk_probe --output data/13f/bulk_probe
+      - name: Upload evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: sec-13f-bulk-probe-${{ github.run_id }}
+          path: data/13f/bulk_probe/
+          retention-days: 14
