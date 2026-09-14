@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/sec-13f-publish-canonical.yml'
       - 'src/ussy_fundamentals/sec_13f_publish.py'
+      - 'tests/test_sec_13f_publish.py'
 
 permissions:
   contents: read
@@ -32,8 +33,12 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - name: Install package
-        run: python -m pip install --disable-pip-version-check -e .
+      - name: Install package and tests
+        run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+      - name: Run canonical publisher contract tests
+        run: pytest -q tests/test_sec_13f_publish.py
       - name: Download canonical full-history evidence
         run: |
           mkdir -p data/13f/history_full
@@ -42,6 +47,10 @@ jobs:
         run: |
           mkdir -p data/13f/uncertainty_full
           gh run download 34656995462 --repo azharmz/ussy-fundamentals --name sec-13f-uncertainty-34656995462 --dir data/13f/uncertainty_full
+      - name: Download audited live current-state evidence
+        run: |
+          mkdir -p data/13f/current_state
+          gh run download 34603142916 --repo azharmz/ussy-fundamentals --name sec-13f-current-state-34603142916 --dir data/13f/current_state
       - name: Audit inputs before publish
         run: |
           test -f data/13f/history_full/sponsorship_state_events.parquet
@@ -50,14 +59,25 @@ jobs:
           test -f data/13f/uncertainty_full/uncertainty_state_events.parquet
           test -f data/13f/uncertainty_full/current_uncertainty_state.parquet
           test -f data/13f/uncertainty_full/uncertainty_summary.json
-          cat data/13f/history_full/summary.json
-          cat data/13f/uncertainty_full/uncertainty_summary.json
+          test -f data/13f/current_state/sponsorship_mapped.csv
+          test -f data/13f/current_state/amendment_lineage.csv
+          test -f data/13f/current_state/summary.json
+          python - <<'PY'
+          import json
+          s=json.load(open('data/13f/current_state/summary.json'))
+          assert s['data_gate_pass'] is True
+          assert s['accepted_at_complete_rate'] == 1.0
+          assert s['ambiguous_lineage_events'] == 0
+          PY
       - name: Publish immutable snapshot then pointer
         run: |
           python -m ussy_fundamentals.sec_13f_publish \
             --history-root data/13f/history_full \
             --uncertainty-root data/13f/uncertainty_full \
+            --live-root data/13f/current_state \
             --history-run-id 34654725293 \
             --history-commit 7559b13e45e696745c89713462e42dc83b4e5acc \
             --uncertainty-run-id 34656995462 \
-            --uncertainty-commit 1c44b7c90b54d6689638dc2ac44b3a6fb02f99eb
+            --uncertainty-commit 1c44b7c90b54d6689638dc2ac44b3a6fb02f99eb \
+            --live-run-id 34603142916 \
+            --live-commit 9163eb83859fd1da21dccec432b5791d3a941d41
