@@ -1,0 +1,29 @@
+name: Validate 13F identity mapping
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ussy_fundamental/sec_13f_identity_mapping.py'
+      - 'tests/test_sec_13f_identity_mapping.py'
+      - 'docs/decisions/2026-09-15-sec-13f-identity-mapping-audit.md'
+      - '.github/workflows/validate-13f-identity-mapping.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  semantic-validation:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: Run 13F identity mapping tests
+        run: python -m pytest -q tests/test_sec_13f_identity_mapping.py
