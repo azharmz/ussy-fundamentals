@@ -2,74 +2,83 @@
 
 Date: 2026-09-15
 
-Status: **EXACT MAPPING PATH APPROVED / FUZZY MAPPING FORBIDDEN / LIVE COVERAGE NOT YET MEASURED**
+Status: **CANONICAL US-ISIN→CUSIP PATH CONFIRMED / OPENFIGI DEMOTED TO FALLBACK AUDIT ONLY / LIVE COVERAGE ALREADY MEASURED**
 
-Contract: `sec-13f-identity-mapping-v1`
+## Correction
 
-## Question
+A repository audit found that the production 13F path already had a stronger identity bridge than the newly explored OpenFIGI path.
 
-Can a Form 13F holding identified by CUSIP be mapped into the project's stock/security identity without guessing from issuer name or loosely matching ticker text?
+For project securities whose canonical `security_id` is a U.S. ISIN (`US` + 9-character CUSIP + ISIN check digit), the CUSIP used by Form 13F is recoverable deterministically as `security_id[2:11]`. No external identifier provider is required for those securities.
 
-## Findings
+This is the canonical identity path for current production sponsorship evidence.
 
-1. Form 13F information tables carry `CUSIP` as a security identifier. Current SEC Form 13F technical specifications also allow an optional `FIGI` field in the information table.
-2. SEC's public ticker association files map CIK/company/ticker/exchange, but do not provide a general CUSIP-to-ticker bridge. Therefore SEC-only identity resolution is insufficient for arbitrary 13F holdings.
-3. OpenFIGI's public Mapping API explicitly supports `ID_CUSIP` and returns FIGI plus security metadata including ticker, market sector, security type and exchange code. Unauthenticated usage is rate-limited but available without a paid data contract.
-4. A CUSIP may map to an instrument outside the project's tradable universe. This is not an error; it is `NOT_EVALUABLE` for project-level sponsorship evidence.
-5. Mapping must be exact and unique. Issuer-name similarity, ticker prefixes, manual substitutions, and after-the-fact share-class guesses are not permitted.
+## Existing production evidence
 
-## Frozen identity policy
+`src/ussy_fundamentals/sec_13f_current_state.py` already implements `US_ISIN_BODY_TO_CUSIP9` mapping and processes Form 13F holdings with PIT filing/amendment lineage.
 
-A 13F holding may be attached to a project security only when all of the following are true:
+Canonical current-state run:
 
-- the filing holding has a non-empty CUSIP;
-- an audited identifier provider returns a result for that exact CUSIP;
-- the result carries a FIGI and ticker;
-- the returned instrument is in the Equity market sector;
-- exactly one eligible provider result remains;
-- the returned ticker exactly matches exactly one project security identity.
+- workflow: `SEC 13F current PIT state`
+- run: `34603142916`
+- job: `103275091513`
+- result: **SUCCESS**
+- universe: **1,327** securities
+- deterministic U.S.-ISIN identities: **1,010**
+- non-U.S.-ISIN not evaluable by this deterministic path: **317**
+- latest report period: **2026-06-30**
+- latest-period mapped securities: **996**
+- 13F filings processed: **9,731**
+- fetch success rate: **100%**
+- accepted-at completeness: **100%**
+- amendment classification: **383/383**
+- ambiguous lineage events: **0**
+- data-quality gate: **PASS**
 
-Otherwise the holding remains `NOT_EVALUABLE` for project-security aggregation.
+Thus latest-period coverage among deterministic U.S.-ISIN securities was `996 / 1010 ≈ 98.6%`. The remaining difference is not evidence of zero sponsorship; it means no evaluable mapped sponsorship state was present for those securities in that period.
 
-The first approved provider candidate is `OPENFIGI` for identity translation only. OpenFIGI is not the ownership source and does not replace SEC filing provenance.
+## Canonical R2 publication already exists
 
-## PIT and provenance
+The production sponsorship publisher also already ran successfully:
 
-The ownership observation's availability clock remains the SEC filing `accepted_at` timestamp from `sec-13f-institutional-sponsorship-v1`.
+- workflow: `SEC 13F canonical sponsorship publish`
+- run: `34663714292`
+- job: `103471275697`
+- result: **SUCCESS**
+- status pointer: **READY**
+- snapshot prefix: `institutional_sponsorship/snapshots/2026-09-12/run-34663714292`
+- manifest: `institutional_sponsorship/snapshots/2026-09-12/run-34663714292/manifest.json`
 
-Identifier-provider metadata must preserve at least:
+The historical source processed **313,055** 13F filings across **53** official datasets. Historical state preserves uncertainty from ambiguous amendment lineages rather than fabricating certainty.
 
-- input CUSIP;
-- returned FIGI;
-- returned ticker;
-- provider identity;
-- provider observation/fetch timestamp;
-- mapping contract version.
+## OpenFIGI role after reconciliation
 
-The mapping provider timestamp does not move the 13F holding backward in time and cannot be used to backdate an ownership observation before its SEC `accepted_at` timestamp.
+The newer `sec-13f-identity-mapping-v1.1` / OpenFIGI work is retained as research/audit evidence, especially for understanding venue-level FIGI duplication and possible future non-US or exceptional identity cases.
 
-## Explicitly forbidden
+It is **not** required for the canonical U.S.-ISIN production path and must not replace a deterministic ISIN→CUSIP mapping with a network dependency.
 
-- issuer-name fuzzy matching;
-- ticker-prefix matching;
-- guessing share class;
-- mapping a debt/warrant/option result into the common stock merely because issuer names match;
-- resolving multiple eligible results by arbitrary first-match behavior;
-- treating absence from the project universe as zero institutional ownership;
-- representing this identity mapping as IBD Accumulation/Distribution evidence.
+If OpenFIGI is ever used as a fallback, it remains subject to the frozen safeguards:
 
-## Implementation
+- exact CUSIP input only;
+- common-equity identity only;
+- venue rows must converge on stable share-class/composite identity;
+- no fuzzy issuer-name matching;
+- no ticker-prefix guessing;
+- no arbitrary first-result selection.
 
-`src/ussy_fundamental/sec_13f_identity_mapping.py` implements the provider-agnostic exact mapping gate. `tests/test_sec_13f_identity_mapping.py` covers exact success, ambiguity, non-equity results, missing FIGI/CUSIP, and project-universe identity failures.
+## PIT boundary
 
-## Next gate
+The ownership-information clock remains SEC filing availability. Current filing-level pipelines preserve `accepted_at`; historical bulk state uses its separately documented conservative historical-availability semantics. Quarter-end must never be treated as if the filing were already public then.
 
-Run a small descriptive coverage audit against a deterministic sample of current project securities / 13F CUSIPs using OpenFIGI. Measure only:
+## CAN SLIM interpretation
 
-- exact unique mapping rate;
-- ambiguous mapping rate;
-- non-equity mapping rate;
-- outside-universe mapping rate;
-- provider failures/rate-limit behavior.
+This dataset is valid evidence for stock-level **I — Institutional Sponsorship**: manager count, reported holdings/shares/value, and changes through filing history.
 
-Do not yet build a full 13F production ingestion pipeline.
+It is **not** IBD Accumulation/Distribution Rating and it is **not** a real-time institutional buying/selling signal. It therefore does not by itself satisfy #51/#54 market-level `institutional accumulation/selling` evidence for the general-market classifier.
+
+## Terminal decision
+
+**STOCK-LEVEL CAN SLIM I DATA SOURCE: AVAILABLE / PIT-AUDITED / CANONICAL R2 SNAPSHOT LIVE**
+
+**OPENFIGI: FALLBACK/IDENTITY-AUDIT TOOL ONLY, NOT A PRODUCTION PREREQUISITE FOR U.S.-ISIN SECURITIES**
+
+**#54 MARKET-LEVEL INSTITUTIONAL DEMAND/SELLING: STILL SEPARATE AND UNRESOLVED**
