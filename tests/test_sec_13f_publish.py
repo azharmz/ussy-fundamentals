@@ -1,3 +1,4 @@
+import io
 import json
 from pathlib import Path
 
@@ -10,10 +11,23 @@ class FakeClient:
     def __init__(self):
         self.uploads = []
         self.objects = []
+        self.store = {}
     def upload_file(self, path, bucket, key, ExtraArgs=None):
         self.uploads.append((path, bucket, key, ExtraArgs))
+        self.store[key] = Path(path).read_bytes()
     def put_object(self, **kwargs):
         self.objects.append(kwargs)
+        body = kwargs.get('Body', b'')
+        if isinstance(body, str):
+            body = body.encode()
+        self.store[kwargs['Key']] = body
+    def get_object(self, Bucket, Key):
+        return {'Body': io.BytesIO(self.store[Key])}
+    def list_objects_v2(self, Bucket, Prefix, **kwargs):
+        contents = [{'Key': k, 'Size': len(v)} for k, v in self.store.items() if k.startswith(Prefix)]
+        return {'Contents': contents, 'IsTruncated': False}
+    def delete_object(self, Bucket, Key):
+        self.store.pop(Key, None)
 
 
 def _touch(root: Path, names):
