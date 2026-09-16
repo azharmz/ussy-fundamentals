@@ -5,9 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/sec-13f-publish-canonical.yml'
-      - 'src/ussy_fundamentals/sec_13f_publish.py'
-      - 'tests/test_sec_13f_publish.py'
+      - '.github/run-sec-13f-publish-canonical'
 
 permissions:
   contents: read
