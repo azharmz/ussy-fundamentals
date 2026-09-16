@@ -1,3 +1,4 @@
+import gzip
 import io
 import json
 from pathlib import Path
@@ -58,14 +59,19 @@ def roots(tmp_path):
     return h,u,l
 
 
-def test_pointer_exposes_live_exact_accepted_at_state(tmp_path):
+def _publish(tmp_path, client=None):
     h,u,l = roots(tmp_path)
-    client = FakeClient()
-    _, manifest, pointer = publish(
+    client = client or FakeClient()
+    result = publish(
         history_root=h, uncertainty_root=u, live_root=l,
         history_run_id='h1', history_commit='hc', uncertainty_run_id='u1', uncertainty_commit='uc',
         live_run_id='l1', live_commit='lc', publisher_run_id='p1', publisher_commit='pc',
         bucket='bucket', client=client)
+    return h,u,l,client,result
+
+
+def test_pointer_exposes_live_exact_accepted_at_state(tmp_path):
+    _,_,_,client,(_, manifest, pointer) = _publish(tmp_path)
     assert manifest['schema_version'] == 2
     assert manifest['semantics']['live_availability'] == 'exact_edgar_accepted_at'
     assert manifest['semantics']['quarter_end_used_as_availability'] is False
@@ -73,6 +79,33 @@ def test_pointer_exposes_live_exact_accepted_at_state(tmp_path):
     assert pointer['live_availability'] == 'exact_edgar_accepted_at'
     assert pointer['live_sponsorship_mapped_key'].endswith('/live/sponsorship_mapped.csv')
     assert pointer['live_amendment_lineage_key'].endswith('/live/amendment_lineage.csv')
+    assert pointer['storage_contract'] == 'lossless-gzip-v1-selective'
+    assert client.objects[-1]['Key'] == 'institutional_sponsorship/current.json'
+
+
+def test_selective_gzip_is_deterministic_lossless_and_manifested(tmp_path):
+    h,u,l = roots(tmp_path)
+    payload = ('manager,period,value\n' + '0001,2026Q2,123456\n' * 500).encode()
+    (l/'filings.csv').write_bytes(payload)
+    client = FakeClient()
+    _, manifest, pointer = publish(
+        history_root=h, uncertainty_root=u, live_root=l,
+        history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc',
+        live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc',
+        bucket='b', client=client)
+    meta = manifest['artifacts']['live/filings.csv']
+    assert meta['representation'] == 'gzip'
+    assert meta['compression'] == 'gzip'
+    assert meta['content_encoding'] == 'gzip'
+    assert meta['key'].endswith('/live/filings.csv.gz')
+    assert gzip.decompress(client.store[meta['key']]) == payload
+    assert meta['logical_size_bytes'] == len(payload)
+    assert meta['stored_size_bytes'] < len(payload)
+    assert manifest['storage_summary']['bytes_saved'] > 0
+    # Public legacy consumer keys remain unchanged during transition.
+    assert pointer['live_sponsorship_mapped_key'].endswith('/live/sponsorship_mapped.csv')
+    gz_put = next(x for x in client.objects if x['Key'] == meta['key'])
+    assert gz_put['ContentEncoding'] == 'gzip'
     assert client.objects[-1]['Key'] == 'institutional_sponsorship/current.json'
 
 
