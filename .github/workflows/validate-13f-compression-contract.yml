@@ -1,0 +1,51 @@
+name: Validate 13F compression contract
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/validate-13f-compression-contract.yml'
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: |
+          python -m pip install --disable-pip-version-check -e .
+          python -m pip install pytest
+      - run: pytest -q tests/test_sec_13f_publish.py
+      - name: Download canonical source artifacts
+        run: |
+          mkdir -p data/13f/history_full data/13f/uncertainty_full data/13f/current_state
+          gh run download 34654725293 --repo azharmz/ussy-fundamentals --name sec-13f-history-full-34654725293 --dir data/13f/history_full
+          gh run download 34656995462 --repo azharmz/ussy-fundamentals --name sec-13f-uncertainty-34656995462 --dir data/13f/uncertainty_full
+          gh run download 34603142916 --repo azharmz/ussy-fundamentals --name sec-13f-current-state-34603142916 --dir data/13f/current_state
+      - name: Validate semantic byte equivalence and predicted storage
+        run: |
+          python - <<'PY'
+          import gzip,json
+          from pathlib import Path
+          from ussy_fundamentals.sec_13f_publish import _collect
+          groups={'history':Path('data/13f/history_full'),'uncertainty':Path('data/13f/uncertainty_full'),'live':Path('data/13f/current_state')}
+          rows=[]
+          for group,root in groups.items():
+            for rel,m in _collect(root,f'candidate/{group}',group).items():
+              logical=(root/rel).read_bytes()
+              stored=m.get('stored_body',logical)
+              decoded=gzip.decompress(stored) if m['representation']=='gzip' else stored
+              assert decoded == logical, f'semantic mismatch: {group}/{rel}'
+              rows.append({'artifact':f'{group}/{rel}','representation':m['representation'],'logical_bytes':len(logical),'stored_bytes':len(stored),'bytes_saved':len(logical)-len(stored)})
+          report={'semantic_equivalence':True,'artifacts':rows,'logical_bytes':sum(x['logical_bytes'] for x in rows),'stored_bytes':sum(x['stored_bytes'] for x in rows),'bytes_saved':sum(x['bytes_saved'] for x in rows),'compressed_artifacts':sum(x['representation']=='gzip' for x in rows)}
+          Path('13f-compression-validation.json').write_text(json.dumps(report,indent=2,sort_keys=True))
+          print(json.dumps(report,indent=2,sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: 13f-compression-validation-${{ github.run_id }}
+          path: 13f-compression-validation.json
