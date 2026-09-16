@@ -1,0 +1,30 @@
+name: Cleanup guarded 13F orphan snapshot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cleanup-13f-orphan-snapshot.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      TARGET_SNAPSHOT_PREFIX: institutional_sponsorship/snapshots/2026-09-12/run-34663714292
+      APPLY_DELETE: 'true'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check -e .
+      - name: Delete only audited orphan snapshot and verify pointer
+        run: python -m ussy_fundamentals.cleanup_13f_snapshot
