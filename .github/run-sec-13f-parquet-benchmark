@@ -1,2 +1,2 @@
-run=2026-09-17T00:00:00Z
-purpose=benchmark-current-canonical-parquet-codecs
+run=2026-09-17T06:20:00Z
+purpose=diagnose-parquet-semantic-fingerprint
