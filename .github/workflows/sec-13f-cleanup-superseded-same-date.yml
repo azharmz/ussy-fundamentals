@@ -1,0 +1,90 @@
+name: Cleanup guarded 13F superseded same-date snapshot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/run-sec-13f-cleanup-superseded-same-date'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sec-13f-cleanup-superseded-same-date
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      TARGET_PREFIX: institutional_sponsorship/snapshots/2026-09-16/run-35153694352/
+      EXPECTED_CURRENT_PREFIX: institutional_sponsorship/snapshots/2026-09-16/run-35159175037
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check boto3
+      - name: Guard, delete superseded prefix, verify
+        shell: python
+        run: |
+          import json, os
+          import boto3
+          from botocore.config import Config
+
+          bucket=os.environ['R2_BUCKET_NAME']
+          target=os.environ['TARGET_PREFIX']
+          expected=os.environ['EXPECTED_CURRENT_PREFIX'].rstrip('/')
+          client=boto3.client('s3',endpoint_url=os.environ['R2_ENDPOINT_URL'],aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],region_name='auto',config=Config(signature_version='s3v4'))
+
+          def pointer():
+              return json.loads(client.get_object(Bucket=bucket,Key='institutional_sponsorship/current.json')['Body'].read())
+          def listed(prefix):
+              out=[]; token=None
+              while True:
+                  kw={'Bucket':bucket,'Prefix':prefix}
+                  if token: kw['ContinuationToken']=token
+                  r=client.list_objects_v2(**kw); out.extend(r.get('Contents',[]))
+                  if not r.get('IsTruncated'): return out
+                  token=r['NextContinuationToken']
+
+          before=pointer(); current=str(before.get('snapshot_prefix','')).rstrip('/')
+          if current != expected:
+              raise RuntimeError(f'current pointer guard failed: {current} != {expected}')
+          if current+'/' == target:
+              raise RuntimeError('refusing to delete current snapshot')
+          refs={v for k,v in before.items() if k.endswith('_key') and isinstance(v,str)}
+          objs=listed(target); keys={o['Key'] for o in objs}
+          if not objs:
+              raise RuntimeError('target prefix is already empty; refusing ambiguous cleanup')
+          if target+'manifest.json' not in keys:
+              raise RuntimeError('target snapshot has no manifest; refusing cleanup')
+          if keys & refs:
+              raise RuntimeError('target contains current pointer references; refusing cleanup')
+
+          # Re-read immediately before destructive action.
+          now=pointer(); now_current=str(now.get('snapshot_prefix','')).rstrip('/')
+          now_refs={v for k,v in now.items() if k.endswith('_key') and isinstance(v,str)}
+          if now_current != expected or target.rstrip('/') == now_current or keys & now_refs:
+              raise RuntimeError('pointer moved or target became protected; refusing cleanup')
+
+          deleted_bytes=sum(int(o.get('Size',0)) for o in objs)
+          for key in sorted(keys): client.delete_object(Bucket=bucket,Key=key)
+          remaining=listed(target)
+          if remaining:
+              raise RuntimeError(f'post-delete verification failed: {len(remaining)} objects remain')
+          after=pointer()
+          if str(after.get('snapshot_prefix','')).rstrip('/') != expected:
+              raise RuntimeError('current pointer changed during cleanup')
+
+          # Verify previous distinct date still exists.
+          previous=listed('institutional_sponsorship/snapshots/2026-09-14/')
+          if not previous:
+              raise RuntimeError('previous distinct snapshot date missing after cleanup')
+          print(json.dumps({'status':'VERIFIED','target':target.rstrip('/'),'deleted_objects':len(objs),'deleted_bytes':deleted_bytes,'current_snapshot':expected,'previous_date_objects':len(previous)},indent=2))
