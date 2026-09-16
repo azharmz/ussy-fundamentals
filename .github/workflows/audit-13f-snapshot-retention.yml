@@ -2,10 +2,6 @@ name: Audit 13F snapshot retention
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/audit-13f-snapshot-retention.yml'
 
 permissions:
   contents: read
