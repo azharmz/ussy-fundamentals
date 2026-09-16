@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import mimetypes
@@ -13,6 +14,22 @@ from .universe_source import _env, r2_client
 
 SNAPSHOT_ROOT = 'institutional_sponsorship/snapshots/'
 DEFAULT_RETAIN_SNAPSHOT_DATES = 2
+STORAGE_CONTRACT = 'lossless-gzip-v1-selective'
+GZIP_MIN_BYTES = 1024
+GZIP_MAX_RATIO = 0.90
+# These are public pointer-contract artifacts. Keep their legacy representation until
+# every downstream consumer explicitly supports compressed keys. Parquet is also
+# already internally compressed; the production audit showed only ~1.1% additional
+# saving for the 240 MB history event parquet.
+LEGACY_REPRESENTATION_PATHS = {
+    'history/sponsorship_state_events.parquet',
+    'history/final_period_state.parquet',
+    'uncertainty/uncertainty_state_events.parquet',
+    'uncertainty/current_uncertainty_state.parquet',
+    'live/sponsorship_mapped.csv',
+    'live/amendment_lineage.csv',
+    'live/summary.json',
+}
 
 
 def _sha256(path: Path) -> str:
@@ -23,6 +40,10 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def _content_type(path: Path) -> str:
     if path.suffix == '.parquet':
         return 'application/vnd.apache.parquet'
@@ -30,12 +51,52 @@ def _content_type(path: Path) -> str:
     return guessed or 'application/octet-stream'
 
 
-def _collect(root: Path, prefix: str) -> dict[str, dict[str, Any]]:
+def _gzip_bytes(data: bytes) -> bytes:
+    # Match the proven CAN SLIM contract: deterministic gzip, level 6, mtime=0.
+    return gzip.compress(data, compresslevel=6, mtime=0)
+
+
+def _collect(root: Path, prefix: str, group: str) -> dict[str, dict[str, Any]]:
     files: dict[str, dict[str, Any]] = {}
     for path in sorted(p for p in root.rglob('*') if p.is_file()):
         rel = path.relative_to(root).as_posix()
-        files[rel] = {'local_path': path, 'key': f'{prefix}/{rel}', 'sha256': _sha256(path), 'size_bytes': path.stat().st_size}
+        logical_name = f'{group}/{rel}'
+        logical_size = path.stat().st_size
+        logical_sha = _sha256(path)
+        meta: dict[str, Any] = {
+            'local_path': path,
+            'key': f'{prefix}/{rel}',
+            'sha256': logical_sha,
+            'logical_sha256': logical_sha,
+            'size_bytes': logical_size,
+            'logical_size_bytes': logical_size,
+            'stored_size_bytes': logical_size,
+            'representation': 'identity',
+            'content_type': _content_type(path),
+        }
+        # Reuse CAN SLIM's gzip representation only for text artifacts that are not
+        # part of the legacy public pointer contract. Tiny files are left alone.
+        if logical_name not in LEGACY_REPRESENTATION_PATHS and path.suffix.lower() in {'.csv', '.json', '.jsonl'} and logical_size >= GZIP_MIN_BYTES:
+            raw = path.read_bytes()
+            stored = _gzip_bytes(raw)
+            ratio = len(stored) / len(raw) if raw else 1.0
+            if ratio <= GZIP_MAX_RATIO:
+                meta.update({
+                    'key': f'{prefix}/{rel}.gz',
+                    'stored_body': stored,
+                    'stored_sha256': _sha256_bytes(stored),
+                    'stored_size_bytes': len(stored),
+                    'compression': 'gzip',
+                    'content_encoding': 'gzip',
+                    'representation': 'gzip',
+                    'compression_ratio': ratio,
+                })
+        files[rel] = meta
     return files
+
+
+def _manifest_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in meta.items() if k not in {'local_path', 'stored_body'}}
 
 
 def _list_snapshot_objects(client, bucket: str) -> list[dict]:
@@ -73,7 +134,6 @@ def _apply_retention(*, client, bucket: str, pointer_key: str, retain_dates: int
         keys = {o['Key'] for o in obs}
         if keys & refs: raise RuntimeError(f'retention candidate contains current pointer reference: {prefix}')
         if prefix + 'manifest.json' not in keys: raise RuntimeError(f'retention candidate missing manifest: {prefix}')
-        # Re-read current pointer immediately before each destructive prefix.
         now = json.loads(client.get_object(Bucket=bucket, Key=pointer_key)['Body'].read())
         now_current = str(now.get('snapshot_prefix') or '').rstrip('/') + '/'
         now_refs = {v for k, v in now.items() if k.endswith('_key') and isinstance(v, str)}
@@ -104,12 +164,19 @@ def publish(*, history_root: Path, uncertainty_root: Path, live_root: Path,
     if missing: raise FileNotFoundError(f'Missing canonical 13F files: {missing}')
     artifacts: dict[str, dict[str, Any]] = {}
     for group,(root,_) in required.items():
-        for rel,meta in _collect(root,f'{prefix}/{group}').items(): artifacts[f'{group}/{rel}']=meta
-    manifest = {'schema_version':2,'type':'institutional_sponsorship_snapshot','status':'READY','produced_at':produced_at,'snapshot_prefix':prefix,'publisher_run_id':str(publisher_run_id),'publisher_commit':publisher_commit,'history_source_run_id':str(history_run_id),'history_source_commit':history_commit,'uncertainty_source_run_id':str(uncertainty_run_id),'uncertainty_source_commit':uncertainty_commit,'live_source_run_id':str(live_run_id),'live_source_commit':live_commit,'history_summary':history_summary,'uncertainty_summary':uncertainty_summary,'live_summary':live_summary,'semantics':{'historical_availability':'filing_date_plus_1_calendar_day_conservative_v1','live_availability':'exact_edgar_accepted_at','live_identity_mapping':'US_ISIN_BODY_TO_CUSIP9','quarter_end_used_as_availability':False,'ambiguity':'fail_closed'},'artifacts':{name:{k:v for k,v in meta.items() if k!='local_path'} for name,meta in artifacts.items()}}
+        for rel,meta in _collect(root,f'{prefix}/{group}',group).items(): artifacts[f'{group}/{rel}']=meta
+    logical_bytes = sum(int(m['logical_size_bytes']) for m in artifacts.values())
+    stored_bytes = sum(int(m['stored_size_bytes']) for m in artifacts.values())
+    compressed_count = sum(m.get('representation') == 'gzip' for m in artifacts.values())
+    manifest = {'schema_version':2,'type':'institutional_sponsorship_snapshot','status':'READY','produced_at':produced_at,'snapshot_prefix':prefix,'publisher_run_id':str(publisher_run_id),'publisher_commit':publisher_commit,'history_source_run_id':str(history_run_id),'history_source_commit':history_commit,'uncertainty_source_run_id':str(uncertainty_run_id),'uncertainty_source_commit':uncertainty_commit,'live_source_run_id':str(live_run_id),'live_source_commit':live_commit,'storage_contract':STORAGE_CONTRACT,'storage_summary':{'logical_bytes':logical_bytes,'stored_bytes':stored_bytes,'bytes_saved':logical_bytes-stored_bytes,'compressed_artifact_count':compressed_count,'gzip_min_bytes':GZIP_MIN_BYTES,'gzip_max_ratio':GZIP_MAX_RATIO},'history_summary':history_summary,'uncertainty_summary':uncertainty_summary,'live_summary':live_summary,'semantics':{'historical_availability':'filing_date_plus_1_calendar_day_conservative_v1','live_availability':'exact_edgar_accepted_at','live_identity_mapping':'US_ISIN_BODY_TO_CUSIP9','quarter_end_used_as_availability':False,'ambiguity':'fail_closed'},'artifacts':{name:_manifest_meta(meta) for name,meta in artifacts.items()}}
     for meta in artifacts.values():
-        path: Path=meta['local_path']; client.upload_file(str(path),bucket,meta['key'],ExtraArgs={'ContentType':_content_type(path)})
+        path: Path=meta['local_path']
+        if meta.get('representation') == 'gzip':
+            client.put_object(Bucket=bucket,Key=meta['key'],Body=meta['stored_body'],ContentType=meta['content_type'],ContentEncoding='gzip')
+        else:
+            client.upload_file(str(path),bucket,meta['key'],ExtraArgs={'ContentType':meta['content_type']})
     manifest_key=f'{prefix}/manifest.json'; client.put_object(Bucket=bucket,Key=manifest_key,Body=json.dumps(manifest,indent=2,sort_keys=True).encode(),ContentType='application/json')
-    pointer={'schema_version':2,'type':'institutional_sponsorship_current_pointer','status':'READY','updated_at':produced_at,'snapshot_prefix':prefix,'manifest_key':manifest_key,'publisher_run_id':str(publisher_run_id),'history_source_run_id':str(history_run_id),'uncertainty_source_run_id':str(uncertainty_run_id),'live_source_run_id':str(live_run_id),'history_state_events_key':manifest['artifacts']['history/sponsorship_state_events.parquet']['key'],'final_period_state_key':manifest['artifacts']['history/final_period_state.parquet']['key'],'uncertainty_state_events_key':manifest['artifacts']['uncertainty/uncertainty_state_events.parquet']['key'],'current_uncertainty_state_key':manifest['artifacts']['uncertainty/current_uncertainty_state.parquet']['key'],'live_sponsorship_mapped_key':manifest['artifacts']['live/sponsorship_mapped.csv']['key'],'live_amendment_lineage_key':manifest['artifacts']['live/amendment_lineage.csv']['key'],'live_summary_key':manifest['artifacts']['live/summary.json']['key'],'live_availability':'exact_edgar_accepted_at','deterministic_us_isin_count':live_summary.get('deterministic_us_isin_count'),'non_us_isin_not_evaluable_count':live_summary.get('non_us_isin_not_evaluable_count'),'strategy_returns_inspected':False,'fwd1_modified':False}
+    pointer={'schema_version':2,'type':'institutional_sponsorship_current_pointer','status':'READY','updated_at':produced_at,'snapshot_prefix':prefix,'manifest_key':manifest_key,'publisher_run_id':str(publisher_run_id),'history_source_run_id':str(history_run_id),'uncertainty_source_run_id':str(uncertainty_run_id),'live_source_run_id':str(live_run_id),'storage_contract':STORAGE_CONTRACT,'history_state_events_key':manifest['artifacts']['history/sponsorship_state_events.parquet']['key'],'final_period_state_key':manifest['artifacts']['history/final_period_state.parquet']['key'],'uncertainty_state_events_key':manifest['artifacts']['uncertainty/uncertainty_state_events.parquet']['key'],'current_uncertainty_state_key':manifest['artifacts']['uncertainty/current_uncertainty_state.parquet']['key'],'live_sponsorship_mapped_key':manifest['artifacts']['live/sponsorship_mapped.csv']['key'],'live_amendment_lineage_key':manifest['artifacts']['live/amendment_lineage.csv']['key'],'live_summary_key':manifest['artifacts']['live/summary.json']['key'],'live_availability':'exact_edgar_accepted_at','deterministic_us_isin_count':live_summary.get('deterministic_us_isin_count'),'non_us_isin_not_evaluable_count':live_summary.get('non_us_isin_not_evaluable_count'),'strategy_returns_inspected':False,'fwd1_modified':False}
     # Pointer is published LAST; retention only runs after the new snapshot is canonical.
     client.put_object(Bucket=bucket,Key=pointer_key,Body=json.dumps(pointer,indent=2,sort_keys=True).encode(),ContentType='application/json')
     retention = _apply_retention(client=client,bucket=bucket,pointer_key=pointer_key)
