@@ -2,6 +2,10 @@ name: Cleanup guarded 13F orphan snapshot
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/run-cleanup-13f-orphan'
 
 permissions:
   contents: read
@@ -14,7 +18,7 @@ jobs:
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-      TARGET_SNAPSHOT_PREFIX: institutional_sponsorship/snapshots/2026-09-12/run-34663714292
+      TARGET_SNAPSHOT_PREFIX: institutional_sponsorship/snapshots/2026-09-16/run-35076053291
       APPLY_DELETE: 'true'
     steps:
       - uses: actions/checkout@v7
