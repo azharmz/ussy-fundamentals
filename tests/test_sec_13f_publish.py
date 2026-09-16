@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ussy_fundamentals.sec_13f_publish import publish
+from ussy_fundamentals.sec_13f_publish import _apply_retention, publish
 
 
 class FakeClient:
@@ -19,16 +19,21 @@ class FakeClient:
     def put_object(self, **kwargs):
         self.objects.append(kwargs)
         body = kwargs.get('Body', b'')
-        if isinstance(body, str):
-            body = body.encode()
+        if isinstance(body, str): body = body.encode()
         self.store[kwargs['Key']] = body
     def get_object(self, Bucket, Key):
         return {'Body': io.BytesIO(self.store[Key])}
     def list_objects_v2(self, Bucket, Prefix, **kwargs):
         contents = [{'Key': k, 'Size': len(v)} for k, v in self.store.items() if k.startswith(Prefix)]
         return {'Contents': contents, 'IsTruncated': False}
-    def delete_object(self, Bucket, Key):
-        self.store.pop(Key, None)
+    def delete_object(self, Bucket, Key): self.store.pop(Key, None)
+
+
+class FailCompressedPutClient(FakeClient):
+    def put_object(self, **kwargs):
+        if str(kwargs.get('Key', '')).endswith('.gz'):
+            raise RuntimeError('simulated compressed upload failure')
+        super().put_object(**kwargs)
 
 
 def _touch(root: Path, names):
@@ -37,17 +42,9 @@ def _touch(root: Path, names):
         p = root / name
         if name.endswith('.json'):
             if name == 'summary.json':
-                p.write_text(json.dumps({
-                    'data_gate_pass': True,
-                    'accepted_at_complete_rate': 1.0,
-                    'ambiguous_lineage_events': 0,
-                    'deterministic_us_isin_count': 1010,
-                    'non_us_isin_not_evaluable_count': 317,
-                }))
-            else:
-                p.write_text('{}')
-        else:
-            p.write_bytes(b'x')
+                p.write_text(json.dumps({'data_gate_pass': True,'accepted_at_complete_rate': 1.0,'ambiguous_lineage_events': 0,'deterministic_us_isin_count': 1010,'non_us_isin_not_evaluable_count': 317}))
+            else: p.write_text('{}')
+        else: p.write_bytes(b'x')
 
 
 def roots(tmp_path):
@@ -60,13 +57,8 @@ def roots(tmp_path):
 
 
 def _publish(tmp_path, client=None):
-    h,u,l = roots(tmp_path)
-    client = client or FakeClient()
-    result = publish(
-        history_root=h, uncertainty_root=u, live_root=l,
-        history_run_id='h1', history_commit='hc', uncertainty_run_id='u1', uncertainty_commit='uc',
-        live_run_id='l1', live_commit='lc', publisher_run_id='p1', publisher_commit='pc',
-        bucket='bucket', client=client)
+    h,u,l = roots(tmp_path); client = client or FakeClient()
+    result = publish(history_root=h, uncertainty_root=u, live_root=l, history_run_id='h1', history_commit='hc', uncertainty_run_id='u1', uncertainty_commit='uc', live_run_id='l1', live_commit='lc', publisher_run_id='p1', publisher_commit='pc', bucket='bucket', client=client)
     return h,u,l,client,result
 
 
@@ -85,49 +77,52 @@ def test_pointer_exposes_live_exact_accepted_at_state(tmp_path):
 
 def test_selective_gzip_is_deterministic_lossless_and_manifested(tmp_path):
     h,u,l = roots(tmp_path)
-    payload = ('manager,period,value\n' + '0001,2026Q2,123456\n' * 500).encode()
-    (l/'filings.csv').write_bytes(payload)
+    payload = ('manager,period,value\n' + '0001,2026Q2,123456\n' * 500).encode(); (l/'filings.csv').write_bytes(payload)
     client = FakeClient()
-    _, manifest, pointer = publish(
-        history_root=h, uncertainty_root=u, live_root=l,
-        history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc',
-        live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc',
-        bucket='b', client=client)
+    _, manifest, pointer = publish(history_root=h, uncertainty_root=u, live_root=l, history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc', live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc', bucket='b', client=client)
     meta = manifest['artifacts']['live/filings.csv']
-    assert meta['representation'] == 'gzip'
-    assert meta['compression'] == 'gzip'
-    assert meta['content_encoding'] == 'gzip'
+    assert meta['representation'] == 'gzip'; assert meta['compression'] == 'gzip'; assert meta['content_encoding'] == 'gzip'
     assert meta['key'].endswith('/live/filings.csv.gz')
     assert gzip.decompress(client.store[meta['key']]) == payload
-    assert meta['logical_size_bytes'] == len(payload)
-    assert meta['stored_size_bytes'] < len(payload)
+    assert meta['logical_size_bytes'] == len(payload); assert meta['stored_size_bytes'] < len(payload)
     assert manifest['storage_summary']['bytes_saved'] > 0
-    # Public legacy consumer keys remain unchanged during transition.
     assert pointer['live_sponsorship_mapped_key'].endswith('/live/sponsorship_mapped.csv')
-    gz_put = next(x for x in client.objects if x['Key'] == meta['key'])
-    assert gz_put['ContentEncoding'] == 'gzip'
+    gz_put = next(x for x in client.objects if x['Key'] == meta['key']); assert gz_put['ContentEncoding'] == 'gzip'
     assert client.objects[-1]['Key'] == 'institutional_sponsorship/current.json'
 
 
+def test_failed_compressed_upload_never_moves_current_pointer(tmp_path):
+    h,u,l = roots(tmp_path); (l/'filings.csv').write_bytes(b'a,b\n1,2\n' * 1000)
+    client = FailCompressedPutClient(); old = {'snapshot_prefix':'institutional_sponsorship/snapshots/2026-09-14/run-old','manifest_key':'institutional_sponsorship/snapshots/2026-09-14/run-old/manifest.json'}
+    client.store['institutional_sponsorship/current.json'] = json.dumps(old).encode()
+    with pytest.raises(RuntimeError, match='compressed upload failure'):
+        publish(history_root=h, uncertainty_root=u, live_root=l, history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc', live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc', bucket='b', client=client)
+    assert json.loads(client.store['institutional_sponsorship/current.json']) == old
+
+
+def test_retention_keeps_current_and_previous_distinct_date_and_rejects_lt_two():
+    c = FakeClient(); root='institutional_sponsorship/snapshots/'
+    current=f'{root}2026-09-16/run-3'; previous=f'{root}2026-09-14/run-2'; old=f'{root}2026-09-12/run-1'
+    for p in (current, previous, old):
+        c.store[p+'/manifest.json']=b'{}'; c.store[p+'/data.bin']=b'x'
+    ptr={'snapshot_prefix':current,'manifest_key':current+'/manifest.json','history_state_events_key':current+'/data.bin'}
+    c.store['institutional_sponsorship/current.json']=json.dumps(ptr).encode()
+    with pytest.raises(RuntimeError, match='at least two'):
+        _apply_retention(client=c,bucket='b',pointer_key='institutional_sponsorship/current.json',retain_dates=1)
+    result=_apply_retention(client=c,bucket='b',pointer_key='institutional_sponsorship/current.json',retain_dates=2)
+    assert result['kept_dates']==['2026-09-14','2026-09-16']
+    assert current+'/manifest.json' in c.store; assert previous+'/manifest.json' in c.store
+    assert not any(k.startswith(old+'/') for k in c.store)
+    assert json.loads(c.store['institutional_sponsorship/current.json']) == ptr
+
+
 def test_live_gate_fails_closed(tmp_path):
-    h,u,l = roots(tmp_path)
-    s = json.loads((l/'summary.json').read_text())
-    s['data_gate_pass'] = False
-    (l/'summary.json').write_text(json.dumps(s))
+    h,u,l = roots(tmp_path); s = json.loads((l/'summary.json').read_text()); s['data_gate_pass'] = False; (l/'summary.json').write_text(json.dumps(s))
     with pytest.raises(RuntimeError, match='data gate'):
-        publish(history_root=h, uncertainty_root=u, live_root=l,
-                history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc',
-                live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc',
-                bucket='b', client=FakeClient())
+        publish(history_root=h, uncertainty_root=u, live_root=l, history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc', live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc', bucket='b', client=FakeClient())
 
 
 def test_ambiguous_live_lineage_fails_closed(tmp_path):
-    h,u,l = roots(tmp_path)
-    s = json.loads((l/'summary.json').read_text())
-    s['ambiguous_lineage_events'] = 1
-    (l/'summary.json').write_text(json.dumps(s))
+    h,u,l = roots(tmp_path); s = json.loads((l/'summary.json').read_text()); s['ambiguous_lineage_events'] = 1; (l/'summary.json').write_text(json.dumps(s))
     with pytest.raises(RuntimeError, match='unambiguous'):
-        publish(history_root=h, uncertainty_root=u, live_root=l,
-                history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc',
-                live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc',
-                bucket='b', client=FakeClient())
+        publish(history_root=h, uncertainty_root=u, live_root=l, history_run_id='h', history_commit='hc', uncertainty_run_id='u', uncertainty_commit='uc', live_run_id='l', live_commit='lc', publisher_run_id='p', publisher_commit='pc', bucket='b', client=FakeClient())
