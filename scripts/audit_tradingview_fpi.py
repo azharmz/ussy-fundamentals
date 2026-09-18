@@ -22,6 +22,7 @@ COLUMNS = [
     "fiscal_period_end_fq",
     "fiscal_period_end_fh",
     "fiscal_period_fy",
+    "fiscal_period_end_fy",
     "earnings_per_share_diluted_fq_h",
     "total_revenue_fq_h",
     "earnings_per_share_diluted_fh_h",
@@ -112,6 +113,7 @@ def main():
             "fiscal_period_end_fq": d.get("fiscal_period_end_fq"),
             "fiscal_period_end_fh": d.get("fiscal_period_end_fh"),
             "fiscal_period_fy": d.get("fiscal_period_fy"),
+            "fiscal_period_end_fy": d.get("fiscal_period_end_fy"),
         }
         for period in ("fq", "fh", "fy"):
             eps = d.get(f"earnings_per_share_diluted_{period}_h")
@@ -127,6 +129,21 @@ def main():
                 f"{period}_paired_usable": _paired(eps, rev),
                 f"{period}_suspicious_zero_revenue_series": bool(rn and rz == 0),
             })
+        # CAN SLIM-oriented coverage gates only. These do NOT establish PIT safety.
+        # C: need enough quarterly history to form at least two YoY comparisons
+        # (current vs year-ago), conservatively requiring >= 8 paired quarters.
+        # A: production policy uses 5 FY target with a 3 FY fallback.
+        out["c_quarterly_8q_coverage"] = out["fq_paired_usable"] >= 8
+        out["a_annual_5y_coverage"] = out["fy_paired_usable"] >= 5
+        out["a_annual_3y_fallback_coverage"] = out["fy_paired_usable"] >= 3
+        out["ca_full_coverage_candidate"] = (
+            out["c_quarterly_8q_coverage"] and out["a_annual_5y_coverage"]
+        )
+        out["ca_3y_fallback_candidate"] = (
+            out["c_quarterly_8q_coverage"]
+            and not out["a_annual_5y_coverage"]
+            and out["a_annual_3y_fallback_coverage"]
+        )
         out["usable_any_period"] = any(
             out[f"{period}_paired_usable"] >= 2 for period in ("fq", "fh", "fy")
         )
@@ -146,6 +163,11 @@ def main():
         "fh_paired_ge2": int((df["fh_paired_usable"] >= 2).sum()),
         "fy_paired_ge2": int((df["fy_paired_usable"] >= 2).sum()),
         "usable_any_period": int(df["usable_any_period"].sum()),
+        "c_quarterly_8q_coverage": int(df["c_quarterly_8q_coverage"].sum()),
+        "a_annual_5y_coverage": int(df["a_annual_5y_coverage"].sum()),
+        "a_annual_3y_fallback_coverage": int(df["a_annual_3y_fallback_coverage"].sum()),
+        "ca_full_coverage_candidate": int(df["ca_full_coverage_candidate"].sum()),
+        "ca_3y_fallback_candidate": int(df["ca_3y_fallback_candidate"].sum()),
         "suspicious_zero_revenue_any": int(
             (
                 df["fq_suspicious_zero_revenue_series"]
