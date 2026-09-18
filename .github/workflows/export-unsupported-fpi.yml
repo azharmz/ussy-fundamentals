@@ -2,6 +2,11 @@ name: Export unsupported FPI
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - run/export-unsupported-fpi
+    paths:
+      - .github/workflows/export-unsupported-fpi.yml
 
 permissions:
   contents: read
