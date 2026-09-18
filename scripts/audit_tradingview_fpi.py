@@ -23,6 +23,11 @@ COLUMNS = [
     "fiscal_period_end_fh",
     "fiscal_period_fy",
     "fiscal_period_end_fy",
+    "earnings_release_date",
+    "earnings_release_trading_date_fq",
+    "earnings_release_trading_date_fy",
+    "earnings_per_share_fq",
+    "revenue_fq",
     "earnings_per_share_diluted_fq_h",
     "total_revenue_fq_h",
     "earnings_per_share_diluted_fh_h",
@@ -114,6 +119,11 @@ def main():
             "fiscal_period_end_fh": d.get("fiscal_period_end_fh"),
             "fiscal_period_fy": d.get("fiscal_period_fy"),
             "fiscal_period_end_fy": d.get("fiscal_period_end_fy"),
+            "earnings_release_date": d.get("earnings_release_date"),
+            "earnings_release_trading_date_fq": d.get("earnings_release_trading_date_fq"),
+            "earnings_release_trading_date_fy": d.get("earnings_release_trading_date_fy"),
+            "earnings_per_share_fq": d.get("earnings_per_share_fq"),
+            "revenue_fq": d.get("revenue_fq"),
         }
         for period in ("fq", "fh", "fy"):
             eps = d.get(f"earnings_per_share_diluted_{period}_h")
