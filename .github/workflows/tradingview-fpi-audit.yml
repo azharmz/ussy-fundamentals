@@ -7,6 +7,7 @@ on:
       - run/tradingview-fpi-audit
     paths:
       - .github/workflows/tradingview-fpi-audit.yml
+      - .trigger/tradingview-fpi-audit
 
 permissions:
   contents: read
