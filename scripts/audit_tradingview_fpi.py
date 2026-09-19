@@ -129,6 +129,7 @@ def main():
             "earnings_release_trading_date_fy": d.get("earnings_release_trading_date_fy"),
             "earnings_per_share_fq": d.get("earnings_per_share_fq"),
             "earnings_per_share_diluted_fq": d.get("earnings_per_share_diluted_fq"),
+            "financial_diluted_eps_fq_available": d.get("earnings_per_share_diluted_fq") is not None,
             "eps_fq_delta_reported_minus_diluted": (d.get("earnings_per_share_fq") - d.get("earnings_per_share_diluted_fq")) if d.get("earnings_per_share_fq") is not None and d.get("earnings_per_share_diluted_fq") is not None else None,
             "revenue_fq": d.get("revenue_fq"),
         }
@@ -175,6 +176,8 @@ def main():
     # for symbols that are already in the canonical unsupported-FPI population.
     live = df[
         (df["ca_full_coverage_candidate"] | df["ca_3y_fallback_candidate"])
+        & df["financial_diluted_eps_fq_available"]
+        & df["revenue_fq"].notna()
         & ~(
             df["fq_suspicious_zero_revenue_series"]
             | df["fy_suspicious_zero_revenue_series"]
@@ -187,6 +190,8 @@ def main():
     live["historical_backtest_allowed"] = False
     live["fallback_priority"] = "AFTER_SEC"
     live["validation_status"] = "CANDIDATE_NOT_PRODUCTION_VALIDATED"
+    live["live_eps_field"] = "earnings_per_share_diluted_fq"
+    live["live_revenue_field"] = "revenue_fq"
     args.live_output.parent.mkdir(parents=True, exist_ok=True)
     live.to_csv(args.live_output, index=False)
 
@@ -232,6 +237,8 @@ def main():
         "ca_full_coverage_candidate": int(df["ca_full_coverage_candidate"].sum()),
         "ca_3y_fallback_candidate": int(df["ca_3y_fallback_candidate"].sum()),
         "live_fallback_candidates_ex_zero_revenue": int(len(live)),
+        "live_candidates_with_financial_diluted_eps_and_revenue": int(len(live)),
+        "financial_diluted_eps_fq_available": int(df["financial_diluted_eps_fq_available"].sum()),
         "semantic_validation_sample": int(len(validation)),
         "eps_semantic_equivalence_assumed": False,
         "suspicious_zero_revenue_any": int(
