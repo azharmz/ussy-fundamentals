@@ -14,6 +14,7 @@ SCANNER_URL = "https://scanner.tradingview.com/america/scan"
 DEFAULT_INPUT = Path("data/processed/unsupported_fpi.csv")
 DEFAULT_OUTPUT = Path("data/processed/tradingview_fpi_coverage.csv")
 DEFAULT_SUMMARY = Path("data/processed/tradingview_fpi_coverage_summary.json")
+DEFAULT_LIVE = Path("data/processed/tradingview_fpi_live_fallback_candidates.csv")
 
 COLUMNS = [
     "name",
@@ -86,6 +87,7 @@ def main():
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY)
     p.add_argument("--batch-size", type=int, default=75)
+    p.add_argument("--live-output", type=Path, default=DEFAULT_LIVE)
     args = p.parse_args()
 
     src = pd.read_csv(args.input)
@@ -163,6 +165,26 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.output, index=False)
 
+    # LIVE-only fallback contract. Historical arrays remain explicitly non-PIT-safe.
+    # SEC remains primary upstream; this file only identifies TradingView candidates
+    # for symbols that are already in the canonical unsupported-FPI population.
+    live = df[
+        (df["ca_full_coverage_candidate"] | df["ca_3y_fallback_candidate"])
+        & ~(
+            df["fq_suspicious_zero_revenue_series"]
+            | df["fy_suspicious_zero_revenue_series"]
+        )
+    ].copy()
+    live["source"] = "TRADINGVIEW"
+    live["source_mode"] = "CURRENT_REVISED"
+    live["scope"] = "LIVE_ONLY"
+    live["pit_safe"] = False
+    live["historical_backtest_allowed"] = False
+    live["fallback_priority"] = "AFTER_SEC"
+    live["validation_status"] = "CANDIDATE_NOT_PRODUCTION_VALIDATED"
+    args.live_output.parent.mkdir(parents=True, exist_ok=True)
+    live.to_csv(args.live_output, index=False)
+
     summary = {
         "schema_version": 1,
         "source": str(args.input),
@@ -178,6 +200,7 @@ def main():
         "a_annual_3y_fallback_coverage": int(df["a_annual_3y_fallback_coverage"].sum()),
         "ca_full_coverage_candidate": int(df["ca_full_coverage_candidate"].sum()),
         "ca_3y_fallback_candidate": int(df["ca_3y_fallback_candidate"].sum()),
+        "live_fallback_candidates_ex_zero_revenue": int(len(live)),
         "suspicious_zero_revenue_any": int(
             (
                 df["fq_suspicious_zero_revenue_series"]
