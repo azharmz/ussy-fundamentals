@@ -51,6 +51,7 @@ jobs:
           path: |
             data/processed/current_universe.csv
             data/processed/current_universe_source.json
+            data/processed/fundamentals_serving_current.json
           if-no-files-found: error
           retention-days: 14
 
@@ -147,6 +148,20 @@ jobs:
           python -m ussy_fundamentals.final_production_report
           echo '--- FINAL PRODUCTION SUMMARY ---'
           cat data/processed/fundamentals_final_production_summary.json
+      - name: Build PIT-safe web serving projection
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from ussy_fundamentals.serving_projection import write_serving_projection
+          source = json.loads(Path("data/processed/current_universe_source.json").read_text())
+          payload = write_serving_projection(
+              source_run_id=os.environ.get("GITHUB_RUN_ID"),
+              source_commit=os.environ.get("GITHUB_SHA"),
+              universe_snapshot_date=source.get("snapshot_date"),
+          )
+          print(f"Serving projection rows: {payload['row_count']}")
+          PY
       - name: Upload final production package
         uses: actions/upload-artifact@v7
         with:
