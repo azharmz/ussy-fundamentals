@@ -32,7 +32,6 @@ COLUMNS = [
     "earnings_per_share_diluted_fq",
     "revenue_fq",
     "total_revenue_fq",
-    "earnings_per_share_fq_h",
     "earnings_per_share_diluted_fq_h",
     "total_revenue_fq_h",
     "earnings_per_share_diluted_fh_h",
@@ -136,7 +135,6 @@ def main():
             "revenue_fq": d.get("revenue_fq"),
             "total_revenue_fq": d.get("total_revenue_fq"),
             "revenue_fq_delta_reported_minus_total": (d.get("revenue_fq") - d.get("total_revenue_fq")) if d.get("revenue_fq") is not None and d.get("total_revenue_fq") is not None else None,
-            "reported_eps_history": json.dumps(_values(d.get("earnings_per_share_fq_h"))),
             "financial_diluted_eps_history": json.dumps(_values(d.get("earnings_per_share_diluted_fq_h"))),
         }
         for period in ("fq", "fh", "fy"):
@@ -177,7 +175,9 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.output, index=False)
 
-    # LIVE-only fallback contract. Historical arrays remain explicitly non-PIT-safe.
+    # RESEARCH coverage set only. Do not call this a production/live fallback:
+    # revenue semantics are not universally statement-equivalent (BLSH negative
+    # control), and historical TradingView arrays are explicitly non-PIT-safe.
     # SEC remains primary upstream; this file only identifies TradingView candidates
     # for symbols that are already in the canonical unsupported-FPI population.
     live = df[
@@ -191,13 +191,14 @@ def main():
     ].copy()
     live["source"] = "TRADINGVIEW"
     live["source_mode"] = "CURRENT_REVISED"
-    live["scope"] = "LIVE_ONLY"
+    live["scope"] = "RESEARCH_COVERAGE_ONLY"
     live["pit_safe"] = False
     live["historical_backtest_allowed"] = False
     live["fallback_priority"] = "AFTER_SEC"
-    live["validation_status"] = "CANDIDATE_NOT_PRODUCTION_VALIDATED"
+    live["validation_status"] = "BLOCKED_REVENUE_SEMANTICS"
     live["live_eps_field"] = "earnings_per_share_diluted_fq"
     live["live_revenue_field"] = "total_revenue_fq"
+    live["production_fallback_allowed"] = False
     args.live_output.parent.mkdir(parents=True, exist_ok=True)
     live.to_csv(args.live_output, index=False)
 
@@ -242,10 +243,10 @@ def main():
         "a_annual_3y_fallback_coverage": int(df["a_annual_3y_fallback_coverage"].sum()),
         "ca_full_coverage_candidate": int(df["ca_full_coverage_candidate"].sum()),
         "ca_3y_fallback_candidate": int(df["ca_3y_fallback_candidate"].sum()),
-        "live_fallback_candidates_ex_zero_revenue": int(len(live)),
-        "live_candidates_with_financial_diluted_eps_and_revenue": int(len(live)),
+        "research_coverage_candidates_ex_zero_revenue": int(len(live)),
+        "research_candidates_with_financial_diluted_eps_and_revenue": int(len(live)),
+        "production_fallback_allowed": False,
         "financial_diluted_eps_fq_available": int(df["financial_diluted_eps_fq_available"].sum()),
-        "reported_eps_history_available": int(df["reported_eps_history"].ne("[]").sum()),
         "total_revenue_fq_available": int(df["total_revenue_fq"].notna().sum()),
         "reported_and_total_revenue_fq_available": int((df["revenue_fq"].notna() & df["total_revenue_fq"].notna()).sum()),
         "semantic_validation_sample": int(len(validation)),
@@ -257,7 +258,7 @@ def main():
                 | df["fy_suspicious_zero_revenue_series"]
             ).sum()
         ),
-        "note": "Coverage audit only. TradingView historical arrays are current-revised and are not treated as PIT-safe.",
+        "note": "Research coverage audit only. Revenue semantics are blocked for production fallback; TradingView historical arrays are current-revised and are not PIT-safe.",
     }
     args.summary.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(summary, indent=2, sort_keys=True))
