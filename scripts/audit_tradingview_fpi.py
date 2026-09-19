@@ -31,6 +31,7 @@ COLUMNS = [
     "earnings_per_share_fq",
     "earnings_per_share_diluted_fq",
     "revenue_fq",
+    "total_revenue_fq",
     "earnings_per_share_diluted_fq_h",
     "total_revenue_fq_h",
     "earnings_per_share_diluted_fh_h",
@@ -132,6 +133,8 @@ def main():
             "financial_diluted_eps_fq_available": d.get("earnings_per_share_diluted_fq") is not None,
             "eps_fq_delta_reported_minus_diluted": (d.get("earnings_per_share_fq") - d.get("earnings_per_share_diluted_fq")) if d.get("earnings_per_share_fq") is not None and d.get("earnings_per_share_diluted_fq") is not None else None,
             "revenue_fq": d.get("revenue_fq"),
+            "total_revenue_fq": d.get("total_revenue_fq"),
+            "revenue_fq_delta_reported_minus_total": (d.get("revenue_fq") - d.get("total_revenue_fq")) if d.get("revenue_fq") is not None and d.get("total_revenue_fq") is not None else None,
         }
         for period in ("fq", "fh", "fy"):
             eps = d.get(f"earnings_per_share_diluted_{period}_h")
@@ -177,7 +180,7 @@ def main():
     live = df[
         (df["ca_full_coverage_candidate"] | df["ca_3y_fallback_candidate"])
         & df["financial_diluted_eps_fq_available"]
-        & df["revenue_fq"].notna()
+        & df["total_revenue_fq"].notna()
         & ~(
             df["fq_suspicious_zero_revenue_series"]
             | df["fy_suspicious_zero_revenue_series"]
@@ -191,7 +194,7 @@ def main():
     live["fallback_priority"] = "AFTER_SEC"
     live["validation_status"] = "CANDIDATE_NOT_PRODUCTION_VALIDATED"
     live["live_eps_field"] = "earnings_per_share_diluted_fq"
-    live["live_revenue_field"] = "revenue_fq"
+    live["live_revenue_field"] = "total_revenue_fq"
     args.live_output.parent.mkdir(parents=True, exist_ok=True)
     live.to_csv(args.live_output, index=False)
 
@@ -239,6 +242,8 @@ def main():
         "live_fallback_candidates_ex_zero_revenue": int(len(live)),
         "live_candidates_with_financial_diluted_eps_and_revenue": int(len(live)),
         "financial_diluted_eps_fq_available": int(df["financial_diluted_eps_fq_available"].sum()),
+        "total_revenue_fq_available": int(df["total_revenue_fq"].notna().sum()),
+        "reported_and_total_revenue_fq_available": int((df["revenue_fq"].notna() & df["total_revenue_fq"].notna()).sum()),
         "semantic_validation_sample": int(len(validation)),
         "eps_semantic_equivalence_assumed": False,
         "suspicious_zero_revenue_any": int(
