@@ -55,3 +55,12 @@ Therefore the TradingView diluted EPS field aligns with the statement-oriented E
 ## Next research gate
 
 Probe TradingView's statement-oriented revenue fields (especially `total_revenue_fq` / financial-data equivalents) against ARM, ALC, AS, KYIV and the BLSH counterexample. BLSH is the required negative control: a valid statement-revenue candidate must not silently reproduce adjusted revenue 92.6m while being labeled SEC/IFRS-equivalent.
+
+
+## Total-revenue probe result
+
+Run 35417881116 tested the financial-data field `total_revenue_fq` separately from `revenue_fq`.
+
+Result: for the candidate population the two fields are identical wherever both are present. The BLSH negative control therefore remains unresolved: `total_revenue_fq` does **not** provide an independent statement-revenue semantic surface and must not be promoted as SEC/IFRS-equivalent merely because it is named `total_revenue`.
+
+Decision: revenue semantics remain BLOCKED for production fallback. Do not solve this by field renaming. The next gate must use an independent statement source / issuer report semantics, or explicitly define a CAN SLIM sales metric contract that permits provider-standardized/adjusted revenue.
