@@ -29,6 +29,7 @@ COLUMNS = [
     "earnings_release_trading_date_fq",
     "earnings_release_trading_date_fy",
     "earnings_per_share_fq",
+    "earnings_per_share_diluted_fq",
     "revenue_fq",
     "earnings_per_share_diluted_fq_h",
     "total_revenue_fq_h",
@@ -127,6 +128,8 @@ def main():
             "earnings_release_trading_date_fq": d.get("earnings_release_trading_date_fq"),
             "earnings_release_trading_date_fy": d.get("earnings_release_trading_date_fy"),
             "earnings_per_share_fq": d.get("earnings_per_share_fq"),
+            "earnings_per_share_diluted_fq": d.get("earnings_per_share_diluted_fq"),
+            "eps_fq_delta_reported_minus_diluted": (d.get("earnings_per_share_fq") - d.get("earnings_per_share_diluted_fq")) if d.get("earnings_per_share_fq") is not None and d.get("earnings_per_share_diluted_fq") is not None else None,
             "revenue_fq": d.get("revenue_fq"),
         }
         for period in ("fq", "fh", "fy"):
@@ -208,7 +211,7 @@ def main():
     # EPS semantics are not assumed equivalent to SEC/IFRS statement EPS.
     # Validation evidence already shows scanner EPS may track adjusted/core/
     # non-GAAP earnings (e.g. ARM and ALC). Keep this explicit and fail closed.
-    validation["eps_semantics"] = "UNKNOWN_REQUIRES_ISSUER_VALIDATION"
+    validation["eps_semantics"] = "REPORTED_VS_FINANCIAL_DILUTED_REQUIRES_VALIDATION"
     validation["revenue_semantics"] = "REPORTED_REVENUE_CANDIDATE"
     validation["sec_eps_equivalent"] = False
     validation.to_csv(args.validation_output, index=False)
