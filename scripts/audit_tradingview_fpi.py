@@ -205,6 +205,12 @@ def main():
     validation["validation_required"] = True
     validation["validation_basis"] = "ISSUER_OR_OFFICIAL_REPORT"
     validation["validation_result"] = "PENDING"
+    # EPS semantics are not assumed equivalent to SEC/IFRS statement EPS.
+    # Validation evidence already shows scanner EPS may track adjusted/core/
+    # non-GAAP earnings (e.g. ARM and ALC). Keep this explicit and fail closed.
+    validation["eps_semantics"] = "UNKNOWN_REQUIRES_ISSUER_VALIDATION"
+    validation["revenue_semantics"] = "REPORTED_REVENUE_CANDIDATE"
+    validation["sec_eps_equivalent"] = False
     validation.to_csv(args.validation_output, index=False)
 
     summary = {
@@ -224,6 +230,7 @@ def main():
         "ca_3y_fallback_candidate": int(df["ca_3y_fallback_candidate"].sum()),
         "live_fallback_candidates_ex_zero_revenue": int(len(live)),
         "semantic_validation_sample": int(len(validation)),
+        "eps_semantic_equivalence_assumed": False,
         "suspicious_zero_revenue_any": int(
             (
                 df["fq_suspicious_zero_revenue_series"]
