@@ -15,6 +15,7 @@ DEFAULT_INPUT = Path("data/processed/unsupported_fpi.csv")
 DEFAULT_OUTPUT = Path("data/processed/tradingview_fpi_coverage.csv")
 DEFAULT_SUMMARY = Path("data/processed/tradingview_fpi_coverage_summary.json")
 DEFAULT_LIVE = Path("data/processed/tradingview_fpi_live_fallback_candidates.csv")
+DEFAULT_VALIDATION = Path("data/processed/tradingview_fpi_semantic_validation_sample.csv")
 
 COLUMNS = [
     "name",
@@ -88,6 +89,7 @@ def main():
     p.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY)
     p.add_argument("--batch-size", type=int, default=75)
     p.add_argument("--live-output", type=Path, default=DEFAULT_LIVE)
+    p.add_argument("--validation-output", type=Path, default=DEFAULT_VALIDATION)
     args = p.parse_args()
 
     src = pd.read_csv(args.input)
@@ -185,6 +187,26 @@ def main():
     args.live_output.parent.mkdir(parents=True, exist_ok=True)
     live.to_csv(args.live_output, index=False)
 
+    # Deterministic semantic-validation sample. This is intentionally NOT a
+    # production acceptance gate: it selects contrasting reporting/timing and
+    # coverage cases for manual comparison against issuer/official reports.
+    sample_parts = []
+    timed = live[live["earnings_release_date"].notna()].sort_values("symbol").head(5)
+    untimed = live[live["earnings_release_date"].isna()].sort_values("symbol").head(3)
+    fallback3 = live[live["ca_3y_fallback_candidate"]].sort_values("symbol").head(3)
+    freq2 = live[live["last_report_frequency"].eq(2)].sort_values("symbol").head(3)
+    for part in (timed, untimed, fallback3, freq2):
+        if not part.empty:
+            sample_parts.append(part)
+    if sample_parts:
+        validation = pd.concat(sample_parts, ignore_index=True).drop_duplicates("symbol")
+    else:
+        validation = live.head(0).copy()
+    validation["validation_required"] = True
+    validation["validation_basis"] = "ISSUER_OR_OFFICIAL_REPORT"
+    validation["validation_result"] = "PENDING"
+    validation.to_csv(args.validation_output, index=False)
+
     summary = {
         "schema_version": 1,
         "source": str(args.input),
@@ -201,6 +223,7 @@ def main():
         "ca_full_coverage_candidate": int(df["ca_full_coverage_candidate"].sum()),
         "ca_3y_fallback_candidate": int(df["ca_3y_fallback_candidate"].sum()),
         "live_fallback_candidates_ex_zero_revenue": int(len(live)),
+        "semantic_validation_sample": int(len(validation)),
         "suspicious_zero_revenue_any": int(
             (
                 df["fq_suspicious_zero_revenue_series"]
