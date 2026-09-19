@@ -32,6 +32,7 @@ COLUMNS = [
     "earnings_per_share_diluted_fq",
     "revenue_fq",
     "total_revenue_fq",
+    "earnings_per_share_fq_h",
     "earnings_per_share_diluted_fq_h",
     "total_revenue_fq_h",
     "earnings_per_share_diluted_fh_h",
@@ -135,6 +136,8 @@ def main():
             "revenue_fq": d.get("revenue_fq"),
             "total_revenue_fq": d.get("total_revenue_fq"),
             "revenue_fq_delta_reported_minus_total": (d.get("revenue_fq") - d.get("total_revenue_fq")) if d.get("revenue_fq") is not None and d.get("total_revenue_fq") is not None else None,
+            "reported_eps_history": json.dumps(_values(d.get("earnings_per_share_fq_h"))),
+            "financial_diluted_eps_history": json.dumps(_values(d.get("earnings_per_share_diluted_fq_h"))),
         }
         for period in ("fq", "fh", "fy"):
             eps = d.get(f"earnings_per_share_diluted_{period}_h")
@@ -242,6 +245,7 @@ def main():
         "live_fallback_candidates_ex_zero_revenue": int(len(live)),
         "live_candidates_with_financial_diluted_eps_and_revenue": int(len(live)),
         "financial_diluted_eps_fq_available": int(df["financial_diluted_eps_fq_available"].sum()),
+        "reported_eps_history_available": int(df["reported_eps_history"].ne("[]").sum()),
         "total_revenue_fq_available": int(df["total_revenue_fq"].notna().sum()),
         "reported_and_total_revenue_fq_available": int((df["revenue_fq"].notna() & df["total_revenue_fq"].notna()).sum()),
         "semantic_validation_sample": int(len(validation)),
