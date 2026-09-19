@@ -33,7 +33,7 @@ jobs:
       - name: Audit TradingView coverage
         run: python scripts/audit_tradingview_fpi.py
       - name: Show summary
-        run: cat data/processed/tradingview_fpi_coverage_summary.json
+        run: cat data/processed/tradingview_fpi_coverage_summary.json\n            data/processed/tradingview_fpi_live_fallback_candidates.csv
       - uses: actions/upload-artifact@v7
         with:
           name: tradingview-fpi-coverage
