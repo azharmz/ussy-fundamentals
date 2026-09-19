@@ -43,5 +43,6 @@ jobs:
             data/processed/tradingview_fpi_coverage.csv
             data/processed/tradingview_fpi_coverage_summary.json
             data/processed/tradingview_fpi_live_fallback_candidates.csv
+            data/processed/tradingview_fpi_semantic_validation_sample.csv
           if-no-files-found: error
           retention-days: 14
