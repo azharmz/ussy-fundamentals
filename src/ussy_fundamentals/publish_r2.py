@@ -25,6 +25,7 @@ DEFAULT_FILES = [
     "fundamentals_final_production_summary.json",
     "current_universe.csv",
     "current_universe_source.json",
+    "fundamentals_serving_current.json",
 ]
 
 
@@ -153,6 +154,7 @@ def publish_snapshot(
         "point_in_time_long_key": manifest["artifacts"]["fundamentals_point_in_time_long.parquet"]["key"],
         "readiness_report_key": manifest["artifacts"]["fundamentals_readiness_report.csv"]["key"],
         "final_report_key": manifest["artifacts"]["fundamentals_final_production_report.csv"]["key"],
+        "serving_current_key": manifest["artifacts"]["fundamentals_serving_current.json"]["key"],
     }
     client.put_object(
         Bucket=bucket,
