@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - run/tradingview-fpi-audit
+      - run/tradingview-adjusted-eps-history
     paths:
       - .github/workflows/tradingview-fpi-audit.yml
 
