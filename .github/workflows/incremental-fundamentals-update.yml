@@ -93,6 +93,22 @@ jobs:
           python -m ussy_fundamentals.final_production_report
           cat data/processed/fundamentals_final_production_summary.json
 
+      - name: Build serving projection
+        if: steps.plan.outputs.needs_update == 'true'
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from ussy_fundamentals.serving_projection import write_serving_projection
+          source = json.loads(Path('data/processed/current_universe_source.json').read_text())
+          payload = write_serving_projection(
+              source_run_id='${{ github.run_id }}',
+              source_commit='${{ github.sha }}',
+              universe_snapshot_date=source.get('snapshot_date'),
+          )
+          print(f"Serving rows: {payload['row_count']}")
+          PY
+
       - name: Publish new immutable R2 snapshot
         if: steps.plan.outputs.needs_update == 'true'
         run: python -m ussy_fundamentals.publish_r2
